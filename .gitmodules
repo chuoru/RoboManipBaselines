@@ -49,3 +49,6 @@
 [submodule "third_party/fairino-python-sdk"]
 	path = third_party/fairino-python-sdk
 	url = https://github.com/FAIR-INNOVATION/fairino-python-sdk
+[submodule "third_party/linkerhand-python-sdk"]
+	path = third_party/linkerhand-python-sdk
+	url = https://github.com/linker-bot/linkerhand-python-sdk

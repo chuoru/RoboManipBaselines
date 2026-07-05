@@ -123,6 +123,8 @@ real-xarm7 = [
 real-fairino = [
   "pyrealsense2",
   "hid",
+  "pymodbus==3.5.1",
+  "pyserial",
 ]
 benchmarks = [
   "ruamel.yaml",

@@ -270,3 +270,17 @@ $ export PYTHONPATH=$PYTHONPATH:`realpath third_party/fairino-python-sdk/windows
 
 > [!NOTE]
 > Run the PYTHONPATH command each time you open a terminal (or add it to your shell profile).
+
+The real Fairino setup uses a [LinkerHand O6](https://github.com/linker-bot/linkerhand-python-sdk) as the end effector, connected over RS485 (Modbus-RTU). Its SDK is vendored under `third_party/linkerhand-python-sdk` and, like the Fairino SDK, has no `pip`-installable package, so add it to `PYTHONPATH` as well:
+```console
+# Go to the top directory of this repository
+$ export PYTHONPATH=$PYTHONPATH:`realpath third_party/linkerhand-python-sdk`
+```
+
+> [!NOTE]
+> Run the PYTHONPATH command each time you open a terminal (or add it to your shell profile).
+
+Grant permission to the RS485-to-USB serial device (device name may vary):
+```console
+$ sudo chmod 777 /dev/ttyUSB0
+```

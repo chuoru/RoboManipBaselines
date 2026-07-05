@@ -4,6 +4,7 @@ from os import path
 import numpy as np
 from fairino import Robot
 from gymnasium.spaces import Box, Dict
+from LinkerHand.linker_hand_api import LinkerHandApi
 
 from robo_manip_baselines.common import ArmConfig
 from robo_manip_baselines.teleop import (
@@ -57,14 +58,18 @@ class RealFairinoEnvBase(RealEnvBase):
     # (see the ServoJ usage in fairino-python-sdk's example/servo.py)
     EXAXIS_POS = [0.0, 0.0, 0.0, 0.0]
 
+    # The LinkerHand's thumb abduction axis ("thumb_cmc_yaw") is held at this fixed
+    # close percentage regardless of the commanded gripper open/close position.
+    GRIPPER_THUMB_ABDUCTION_CLOSE_PERCENT = 50.0
+
     def __init__(
         self,
         robot_ip,
         camera_ids,
         gelsight_ids,
         init_qpos,
-        gripper_company=1,
-        gripper_device=0,
+        gripper_hand_type="right",
+        gripper_modbus_port="/dev/ttyUSB0",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -104,16 +109,17 @@ class RealFairinoEnvBase(RealEnvBase):
         self.arm_joint_pos_actual = np.array(arm_joint_pos)
         print(f"[{self.__class__.__name__}] Finish connecting the Fairino arm.")
 
-        # Connect to Fairino gripper
-        print(f"[{self.__class__.__name__}] Start connecting the Fairino gripper.")
-        self.gripper_index = 0
-        self._check_fr_code(
-            self.robot.SetGripperConfig(gripper_company, gripper_device)
+        # Connect to LinkerHand gripper
+        print(f"[{self.__class__.__name__}] Start connecting the LinkerHand gripper.")
+        self.gripper = LinkerHandApi(
+            hand_type=gripper_hand_type,
+            hand_joint="O6",
+            modbus=gripper_modbus_port,
         )
-        time.sleep(0.2)
-        self._check_fr_code(self.robot.ActGripper(self.gripper_index, 1))
-        time.sleep(0.2)
-        print(f"[{self.__class__.__name__}] Finish connecting the Fairino gripper.")
+        gripper_finger_order = self.gripper.get_finger_order()
+        self.gripper_num_joints = len(gripper_finger_order)
+        self.gripper_thumb_abduction_idx = gripper_finger_order.index("thumb_cmc_yaw")
+        print(f"[{self.__class__.__name__}] Finish connecting the LinkerHand gripper.")
 
         # Connect to RealSense
         self.setup_realsense(camera_ids)
@@ -128,6 +134,20 @@ class RealFairinoEnvBase(RealEnvBase):
     def close(self):
         self.robot.ServoMoveEnd()
         self.robot.CloseRPC()
+
+    def _gripper_pose(self, percent_closed):
+        finger_raw = self._gripper_percent_closed_to_raw(percent_closed)
+        thumb_abduction_raw = self._gripper_percent_closed_to_raw(
+            self.GRIPPER_THUMB_ABDUCTION_CLOSE_PERCENT
+        )
+        pose = [finger_raw] * self.gripper_num_joints
+        pose[self.gripper_thumb_abduction_idx] = thumb_abduction_raw
+        return pose
+
+    @staticmethod
+    def _gripper_percent_closed_to_raw(percent_closed):
+        # LinkerHand joint values are 0 (fully closed) to 255 (fully open)
+        return int(round(np.clip(255.0 * (1.0 - percent_closed / 100.0), 0, 255)))
 
     def setup_input_device(self, input_device_name, motion_manager, overwrite_kwargs):
         if input_device_name == "spacemouse":
@@ -183,27 +203,11 @@ class RealFairinoEnvBase(RealEnvBase):
             self.robot.ServoJ(list(arm_joint_pos_command_deg), self.EXAXIS_POS)
         )
 
-        # Send command to Fairino gripper
-        gripper_pos = float(action[self.body_config_list[0].gripper_joint_idxes][0])
-        vel = 50
-        force = 50
-        maxtime = 30000  # [ms]
-        block = 1  # non-blocking
-        gripper_type = 0  # parallel gripper
-        self._check_fr_code(
-            self.robot.MoveGripper(
-                self.gripper_index,
-                gripper_pos,
-                vel,
-                force,
-                maxtime,
-                block,
-                gripper_type,
-                0,
-                0,
-                0,
-            )
+        # Send command to LinkerHand gripper
+        gripper_percent_closed = float(
+            action[self.body_config_list[0].gripper_joint_idxes][0]
         )
+        self.gripper.finger_move(pose=self._gripper_pose(gripper_percent_closed))
 
         # Wait
         elapsed_duration = time.time() - start_time
@@ -221,10 +225,11 @@ class RealFairinoEnvBase(RealEnvBase):
         self._check_fr_code(fr_code)
         arm_joint_vel = np.deg2rad(np.array(arm_joint_vel_deg, dtype=np.float64))
 
-        # Get state from Fairino gripper
-        fr_code, _gripper_fault, gripper_pos = self.robot.GetGripperCurPosition()
-        self._check_fr_code(fr_code)
-        gripper_joint_pos = np.array([gripper_pos], dtype=np.float64)
+        # Get state from LinkerHand gripper
+        gripper_pose_raw = np.array(self.gripper.get_state(), dtype=np.float64)
+        finger_raw = np.delete(gripper_pose_raw, self.gripper_thumb_abduction_idx)
+        gripper_percent_closed = 100.0 * (1.0 - finger_raw.mean() / 255.0)
+        gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
         gripper_joint_vel = np.zeros(1)
 
         # This arm has no force/torque sensor
