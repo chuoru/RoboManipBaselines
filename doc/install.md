@@ -249,3 +249,24 @@ $ pip install -e .[real-xarm7]
 $ cd third_party/gello_software
 $ pip install -e .
 ```
+
+### [Real Fairino environments](../robo_manip_baselines/envs/real/fairino)
+Install dependent libraries including [gello_software](https://github.com/wuphilipp/gello_software):
+```console
+# Go to the top directory of this repository
+$ pip install -e .[real-fairino]
+
+# Go to the top directory of this repository
+$ cd third_party/gello_software
+$ pip install -e .
+```
+
+The [fairino-python-sdk](https://github.com/FAIR-INNOVATION/fairino-python-sdk) is vendored under `third_party/fairino-python-sdk` and has no `pip`-installable package, so add it to `PYTHONPATH` instead (pick the directory matching your OS):
+```console
+# Go to the top directory of this repository
+$ export PYTHONPATH=$PYTHONPATH:`realpath third_party/fairino-python-sdk/linux`   # Linux
+$ export PYTHONPATH=$PYTHONPATH:`realpath third_party/fairino-python-sdk/windows` # Windows
+```
+
+> [!NOTE]
+> Run the PYTHONPATH command each time you open a terminal (or add it to your shell profile).

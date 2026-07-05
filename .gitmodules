@@ -46,3 +46,6 @@
 	path = third_party/lerobot
 	url = https://github.com/huggingface/lerobot.git
 	ignore = untracked
+[submodule "third_party/fairino-python-sdk"]
+	path = third_party/fairino-python-sdk
+	url = https://github.com/FAIR-INNOVATION/fairino-python-sdk

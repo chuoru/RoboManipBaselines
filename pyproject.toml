@@ -120,6 +120,10 @@ real-xarm7 = [
   "pyrealsense2",
   "hid",
 ]
+real-fairino = [
+  "pyrealsense2",
+  "hid",
+]
 benchmarks = [
   "ruamel.yaml",
   "python-pptx",

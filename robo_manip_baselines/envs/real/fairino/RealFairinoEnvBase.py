@@ -1,0 +1,241 @@
+import time
+from os import path
+
+import numpy as np
+from fairino import Robot
+from gymnasium.spaces import Box, Dict
+
+from robo_manip_baselines.common import ArmConfig
+from robo_manip_baselines.teleop import (
+    GelloInputDevice,
+    KeyboardInputDevice,
+    SpacemouseInputDevice,
+)
+
+from ..RealEnvBase import RealEnvBase
+
+
+class RealFairinoEnvBase(RealEnvBase):
+    # TODO: These are placeholder joint limits for the FR3 arm. Verify them against the
+    # official specification before running on real hardware.
+    action_space = Box(
+        low=np.array(
+            [
+                np.deg2rad(-175),
+                np.deg2rad(-175),
+                np.deg2rad(-175),
+                np.deg2rad(-175),
+                np.deg2rad(-175),
+                np.deg2rad(-175),
+                0.0,
+            ],
+            dtype=np.float32,
+        ),
+        high=np.array(
+            [
+                np.deg2rad(175),
+                np.deg2rad(175),
+                np.deg2rad(175),
+                np.deg2rad(175),
+                np.deg2rad(175),
+                np.deg2rad(175),
+                100.0,
+            ],
+            dtype=np.float32,
+        ),
+        dtype=np.float32,
+    )
+    observation_space = Dict(
+        {
+            "joint_pos": Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float64),
+            "joint_vel": Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float64),
+            "wrench": Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float64),
+        }
+    )
+
+    # This arm has no external axes, so ServoJ's axis position is always zero
+    # (see the ServoJ usage in fairino-python-sdk's example/servo.py)
+    EXAXIS_POS = [0.0, 0.0, 0.0, 0.0]
+
+    def __init__(
+        self,
+        robot_ip,
+        camera_ids,
+        gelsight_ids,
+        init_qpos,
+        gripper_company=1,
+        gripper_device=0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        # Setup robot
+        self.init_qpos = init_qpos
+        # TODO: Verify against the official FR3 max joint speed before running on real hardware.
+        self.joint_vel_limit = np.deg2rad(180)  # [rad/s]
+        self.body_config_list = [
+            ArmConfig(
+                # TODO: Add the FR3 URDF asset at this path before running on real hardware.
+                arm_urdf_path=path.join(
+                    path.dirname(__file__),
+                    "../../assets/common/robots/fairino/fr3.urdf",
+                ),
+                arm_root_pose=None,
+                ik_eef_joint_id=6,
+                arm_joint_idxes=np.arange(6),
+                gripper_joint_idxes=np.array([6]),
+                gripper_joint_idxes_in_gripper_joint_pos=np.array([0]),
+                eef_idx=0,
+                init_arm_joint_pos=self.init_qpos[0:6],
+                init_gripper_joint_pos=np.zeros(1),
+            )
+        ]
+
+        # Connect to Fairino arm
+        print(f"[{self.__class__.__name__}] Start connecting the Fairino arm.")
+        self.robot_ip = robot_ip
+        self.robot = Robot.RPC(self.robot_ip)
+        self._check_fr_code(self.robot.RobotEnable(1))
+        self._check_fr_code(self.robot.Mode(0))
+        self.robot.ResetAllError()
+        self._check_fr_code(self.robot.ServoMoveStart())
+        fr_code, arm_joint_pos = self.robot.GetActualJointPosRadian()
+        self._check_fr_code(fr_code)
+        self.arm_joint_pos_actual = np.array(arm_joint_pos)
+        print(f"[{self.__class__.__name__}] Finish connecting the Fairino arm.")
+
+        # Connect to Fairino gripper
+        print(f"[{self.__class__.__name__}] Start connecting the Fairino gripper.")
+        self.gripper_index = 0
+        self._check_fr_code(
+            self.robot.SetGripperConfig(gripper_company, gripper_device)
+        )
+        time.sleep(0.2)
+        self._check_fr_code(self.robot.ActGripper(self.gripper_index, 1))
+        time.sleep(0.2)
+        print(f"[{self.__class__.__name__}] Finish connecting the Fairino gripper.")
+
+        # Connect to RealSense
+        self.setup_realsense(camera_ids)
+        self.setup_gelsight(gelsight_ids)
+
+    def _check_fr_code(self, fr_code):
+        if fr_code != 0:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Invalid Fairino API code: {fr_code}"
+            )
+
+    def close(self):
+        self.robot.ServoMoveEnd()
+        self.robot.CloseRPC()
+
+    def setup_input_device(self, input_device_name, motion_manager, overwrite_kwargs):
+        if input_device_name == "spacemouse":
+            InputDeviceClass = SpacemouseInputDevice
+        elif input_device_name == "gello":
+            InputDeviceClass = GelloInputDevice
+        elif input_device_name == "keyboard":
+            InputDeviceClass = KeyboardInputDevice
+        else:
+            raise ValueError(
+                f"[{self.__class__.__name__}] Invalid input device key: {input_device_name}"
+            )
+
+        default_kwargs = self.get_input_device_kwargs(input_device_name)
+
+        return [
+            InputDeviceClass(
+                motion_manager.body_manager_list[0],
+                **{**default_kwargs, **overwrite_kwargs},
+            )
+        ]
+
+    def get_input_device_kwargs(self, input_device_name):
+        if input_device_name == "spacemouse":
+            return {"pos_scale": 1.5e-2, "rpy_scale": 1e-2, "gripper_scale": 10.0}
+        else:
+            return super().get_input_device_kwargs(input_device_name)
+
+    def _reset_robot(self):
+        print(
+            f"[{self.__class__.__name__}] Start moving the robot to the reset position."
+        )
+        self._set_action(
+            self.init_qpos, duration=None, joint_vel_limit_scale=0.3, wait=True
+        )
+        print(
+            f"[{self.__class__.__name__}] Finish moving the robot to the reset position."
+        )
+
+    def _set_action(self, action, duration=None, joint_vel_limit_scale=0.5, wait=False):
+        start_time = time.time()
+
+        # Overwrite duration or joint_pos for safety
+        action, duration = self.overwrite_command_for_safety(
+            action, duration, joint_vel_limit_scale
+        )
+
+        # Send command to Fairino arm
+        arm_joint_pos_command_deg = np.rad2deg(
+            action[self.body_config_list[0].arm_joint_idxes]
+        )
+        self._check_fr_code(
+            self.robot.ServoJ(list(arm_joint_pos_command_deg), self.EXAXIS_POS)
+        )
+
+        # Send command to Fairino gripper
+        gripper_pos = float(action[self.body_config_list[0].gripper_joint_idxes][0])
+        vel = 50
+        force = 50
+        maxtime = 30000  # [ms]
+        block = 1  # non-blocking
+        gripper_type = 0  # parallel gripper
+        self._check_fr_code(
+            self.robot.MoveGripper(
+                self.gripper_index,
+                gripper_pos,
+                vel,
+                force,
+                maxtime,
+                block,
+                gripper_type,
+                0,
+                0,
+                0,
+            )
+        )
+
+        # Wait
+        elapsed_duration = time.time() - start_time
+        if wait and elapsed_duration < duration:
+            time.sleep(duration - elapsed_duration)
+
+    def _get_obs(self):
+        # Get state from Fairino arm
+        fr_code, arm_joint_pos = self.robot.GetActualJointPosRadian()
+        self._check_fr_code(fr_code)
+        arm_joint_pos = np.array(arm_joint_pos, dtype=np.float64)
+        self.arm_joint_pos_actual = arm_joint_pos.copy()
+
+        fr_code, arm_joint_vel_deg = self.robot.GetActualJointSpeedsDegree()
+        self._check_fr_code(fr_code)
+        arm_joint_vel = np.deg2rad(np.array(arm_joint_vel_deg, dtype=np.float64))
+
+        # Get state from Fairino gripper
+        fr_code, _gripper_fault, gripper_pos = self.robot.GetGripperCurPosition()
+        self._check_fr_code(fr_code)
+        gripper_joint_pos = np.array([gripper_pos], dtype=np.float64)
+        gripper_joint_vel = np.zeros(1)
+
+        # This arm has no force/torque sensor
+        wrench = np.zeros(6, dtype=np.float64)
+
+        return {
+            "joint_pos": np.concatenate(
+                (arm_joint_pos, gripper_joint_pos), dtype=np.float64
+            ),
+            "joint_vel": np.concatenate(
+                (arm_joint_vel, gripper_joint_vel), dtype=np.float64
+            ),
+            "wrench": wrench,
+        }
