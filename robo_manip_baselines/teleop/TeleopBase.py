@@ -453,6 +453,27 @@ class TeleopBase(OperationDataMixin, ABC):
         self.quit_flag = False
         self.iteration_duration_list = []
 
+        try:
+            self.main_loop()
+        except KeyboardInterrupt:
+            print(f"\n[{self.__class__.__name__}] Interrupted by Ctrl+C. Shutting down.")
+
+        if self.args.result_filename is not None:
+            print(
+                f"[{self.__class__.__name__}] Save the teleoperation results: {self.args.result_filename}"
+            )
+            with open(self.args.result_filename, "w") as result_file:
+                yaml.dump(self.result, result_file)
+
+        self.print_statistics()
+
+        if self.args.replay_log is None:
+            for input_device in self.input_device_list:
+                input_device.close()
+
+        self.env.close()
+
+    def main_loop(self):
         while True:
             iteration_start_time = time.time()
 
@@ -501,21 +522,6 @@ class TeleopBase(OperationDataMixin, ABC):
 
             if (not self.auto_mode) and (iteration_duration < self.env.unwrapped.dt):
                 time.sleep(self.env.unwrapped.dt - iteration_duration)
-
-        if self.args.result_filename is not None:
-            print(
-                f"[{self.__class__.__name__}] Save the teleoperation results: {self.args.result_filename}"
-            )
-            with open(self.args.result_filename, "w") as result_file:
-                yaml.dump(self.result, result_file)
-
-        self.print_statistics()
-
-        if self.args.replay_log is None:
-            for input_device in self.input_device_list:
-                input_device.close()
-
-        # self.env.close()
 
     def reset(self):
         # Reset motion manager
@@ -583,24 +589,24 @@ class TeleopBase(OperationDataMixin, ABC):
         self.data_manager.save_data(filename)
         print(f"[{self.__class__.__name__}] Save the data as {filename}")
 
+    # Width (pixels) of each camera's rgb/depth panel in the teleop display window.
+    # The window's total width is 2x this (rgb panel + depth panel side by side).
+    CAMERA_PANEL_WIDTH = 240
+
     def draw_image(self):
-        phase_image = self.phase_manager.get_phase_image(
-            get_text_func=self.phase_manager.get_text_func,
-            get_color_func=self.phase_manager.get_color_func,
-        )
         rgb_images = []
         depth_images = []
-        for camera_name in (
+        camera_name_list = (
             self.env.unwrapped.camera_names
             + self.env.unwrapped.rgb_tactile_names
             + self.env.unwrapped.pointcloud_camera_names
-        ):
+        )
+        for camera_name in camera_name_list:
             rgb_image = self.info["rgb_images"][camera_name]
             image_ratio = rgb_image.shape[1] / rgb_image.shape[0]
-            resized_image_width = phase_image.shape[1] / 2
             resized_image_size = (
-                int(resized_image_width),
-                int(resized_image_width / image_ratio),
+                self.CAMERA_PANEL_WIDTH,
+                int(self.CAMERA_PANEL_WIDTH / image_ratio),
             )
             rgb_images.append(cv2.resize(rgb_image, resized_image_size))
             if camera_name in self.env.unwrapped.rgb_tactile_names:
@@ -614,8 +620,19 @@ class TeleopBase(OperationDataMixin, ABC):
                 depth_images.append(cv2.resize(depth_image, resized_image_size))
 
         if len(rgb_images) == 0:
+            phase_image = self.phase_manager.get_phase_image(
+                get_text_func=self.phase_manager.get_text_func,
+                get_color_func=self.phase_manager.get_color_func,
+            )
             window_image = phase_image
         else:
+            # Match the phase strip's width to the concatenated rgb+depth panels
+            # (2x CAMERA_PANEL_WIDTH) so it spans the full window width.
+            phase_image = self.phase_manager.get_phase_image(
+                size=(2 * self.CAMERA_PANEL_WIDTH, 50),
+                get_text_func=self.phase_manager.get_text_func,
+                get_color_func=self.phase_manager.get_color_func,
+            )
             window_image = cv2.vconcat(
                 (
                     cv2.hconcat((cv2.vconcat(rgb_images), cv2.vconcat(depth_images))),

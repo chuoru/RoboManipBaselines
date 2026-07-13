@@ -161,3 +161,9 @@ register(
     id="robo_manip_baselines/RealFairinoDemoEnv-v0",
     entry_point="robo_manip_baselines.envs.real.fairino:RealFairinoDemoEnv",
 )
+
+## Fairino-Dual
+register(
+    id="robo_manip_baselines/RealFairinoDualDemoEnv-v0",
+    entry_point="robo_manip_baselines.envs.real.fairino_dual:RealFairinoDualDemoEnv",
+)

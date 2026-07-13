@@ -1,0 +1,8 @@
+robot_ip_left: "192.168.57.2"
+robot_ip_right: "192.168.57.3"
+gripper_hand_type_left: "left"
+gripper_hand_type_right: "right"
+gripper_modbus_port_left: "/dev/ttyUSB0"
+gripper_modbus_port_right: "/dev/ttyUSB1"
+# Dry-run mode: tests command transmission without connecting to actual hardware
+dry_run: true

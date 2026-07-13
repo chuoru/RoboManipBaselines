@@ -1,0 +1,20 @@
+robot_ip_left: "192.168.57.2"
+robot_ip_right: "192.168.57.3"
+# camera_ids:
+#   front: "000000000000"
+# The 3 Orbbec Gemini cameras (head + 2 wrists) are connected via pyorbbecsdk, not
+# pyrealsense2, so they go under pointcloud_camera_ids (see setup_femtobolt in
+# envs/real/RealEnvBase.py), keyed by the camera's serial number so device order
+# doesn't matter. Find each camera's serial number by running:
+#   python ./third_party/pyorbbecsdk/examples/enumerate.py
+pointcloud_camera_ids:
+  head: "CP2AB53000CC"
+  wrist_left: "CV2L3600004F"
+  wrist_right: "CV2L3600005M"
+# gelsight_ids:
+#   tactile_left: "GelSight Mini R0B 2BNK-CE0U: Ge"
+#   tactile_right: "GelSight Mini R0B 2BG8-0H3X: Ge"
+gripper_hand_type_left: "left"
+gripper_hand_type_right: "right"
+gripper_modbus_port_left: "/dev/ttyUSB0"
+gripper_modbus_port_right: "/dev/ttyUSB1"

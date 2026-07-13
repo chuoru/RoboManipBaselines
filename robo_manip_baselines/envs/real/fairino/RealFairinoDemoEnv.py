@@ -13,7 +13,12 @@ class RealFairinoDemoEnv(RealFairinoEnvBase):
             # TODO: This is a placeholder ready pose for the FR3 arm. Verify it against
             # the official specification before running on real hardware.
             init_qpos=np.concatenate(
-                [np.deg2rad([0.0, -30.0, -90.0, 0.0, 90.0, 0.0]), np.array([0.0])]
+                [
+                    np.deg2rad(
+                        [44.088, -55.886, 109.266, -231.54, -89.854, 89.605]
+                    ),
+                    np.array([0.0]),
+                ]
             ),
             **kwargs,
         )

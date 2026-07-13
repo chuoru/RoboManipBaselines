@@ -1,3 +1,6 @@
+# serial_number is the TRACKER's stable hardware serial (starts with "LHR-"),
+# NOT the lighthouse's serial (starts with "LHB-"). Run
+# `python ./teleop/check_vive_devices.py` to find your tracker's serial.
 device_params:
   name: primary
-  serial_number: LHR-301CBF17
+  serial_number: LHR-904A2704

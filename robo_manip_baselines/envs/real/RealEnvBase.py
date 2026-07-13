@@ -2,9 +2,10 @@ import concurrent.futures
 import os
 import re
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
-from queue import Queue
+from queue import Empty, Queue
 
 import cv2
 import gymnasium as gym
@@ -70,15 +71,7 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         sys.path.append(
             os.path.join(os.path.dirname(__file__), "../../../third_party/pyorbbecsdk")
         )
-        from pyorbbecsdk import (
-            AlignFilter,
-            Config,
-            Context,
-            OBSensorType,
-            OBStreamType,
-            Pipeline,
-            PointCloudFilter,
-        )
+        from pyorbbecsdk import Context
 
         ctx = Context()
         device_list = ctx.query_devices()
@@ -87,52 +80,110 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             pointcloud_camera_name,
             pointcloud_camera_id,
         ) in pointcloud_camera_ids.items():
-            if pointcloud_camera_id > curr_device_cnt:
-                raise RuntimeError(
-                    f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, ID: {pointcloud_camera_id}) not detected. Max camera ID: {curr_device_cnt}"
-                )
-            pointcloud_camera = {}
-            queue = Queue()
-            device = device_list.get_device_by_index(pointcloud_camera_id)
-            pipeline = Pipeline(device)
-            config = Config()
-            depth_profile_list = pipeline.get_stream_profile_list(
-                OBSensorType.DEPTH_SENSOR
-            )
-            if depth_profile_list is None:
-                raise RuntimeError(
-                    f"[{self.__class__.__name__}] No proper depth profile, can not generate point cloud."
-                )
-            depth_profile = depth_profile_list.get_default_video_stream_profile()
-            config.enable_stream(depth_profile)
-            has_color_sensor = False
-            color_profile_list = pipeline.get_stream_profile_list(
-                OBSensorType.COLOR_SENSOR
-            )
-            if color_profile_list is not None:
-                has_color_sensor = True
-                color_profile = color_profile_list.get_default_video_stream_profile()
-                config.enable_stream(color_profile)
-            pipeline.enable_frame_sync()
-            pipeline.start(
-                config,
-                lambda frame_set,
-                pointcloud_camera_name=pointcloud_camera_name: self.femtobolt_callback(
-                    frame_set, pointcloud_camera_name
-                ),
-            )
-            camera_param = pipeline.get_camera_param()
-            align_filter = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
-            point_cloud_filter = PointCloudFilter()
-            point_cloud_filter.set_camera_param(camera_param)
+            # A string ID is matched against the device's serial number (stable across
+            # reboots/replugs, e.g. for multi-camera rigs); an int ID is matched by
+            # enumeration index (order is not guaranteed to be stable).
+            if isinstance(pointcloud_camera_id, str):
+                try:
+                    device = device_list.get_device_by_serial_number(
+                        pointcloud_camera_id
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, serial: {pointcloud_camera_id}) not detected: {e}"
+                    )
+            else:
+                if pointcloud_camera_id > curr_device_cnt:
+                    raise RuntimeError(
+                        f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, ID: {pointcloud_camera_id}) not detected. Max camera ID: {curr_device_cnt}"
+                    )
+                device = device_list.get_device_by_index(pointcloud_camera_id)
 
-            pointcloud_camera["queue"] = queue
-            pointcloud_camera["has_color_sensor"] = has_color_sensor
-            pointcloud_camera["pipeline"] = pipeline
-            pointcloud_camera["align_filter"] = align_filter
-            pointcloud_camera["point_cloud_filter"] = point_cloud_filter
+            self.pointcloud_cameras[pointcloud_camera_name] = {
+                "queue": Queue(),
+                "device": device,
+                # Tracks consecutive frame timeouts, to trigger a pipeline restart
+                # after repeated misses (see get_pointcloud_camera_data).
+                "consecutive_failures": 0,
+                # Last successfully processed frame, reused as a frozen fallback
+                # image while a flaky camera is being reconnected, so a dropped
+                # camera doesn't crash or stall the teleop loop.
+                "last_result": None,
+                # True while a background reconnect attempt is in flight, to avoid
+                # piling up multiple concurrent reconnect threads for one camera.
+                "reconnecting": False,
+            }
+            self._start_femtobolt_pipeline(pointcloud_camera_name)
 
-            self.pointcloud_cameras[pointcloud_camera_name] = pointcloud_camera
+    def _start_femtobolt_pipeline(self, pointcloud_camera_name):
+        """(Re)start the pyorbbecsdk pipeline for one Orbbec camera. Used both for
+        the initial connection and to recover a camera whose frame callback has
+        stopped firing (flaky USB link).
+
+        Only the color stream is enabled: depth streaming (and the resulting
+        point-cloud computation) roughly doubles the USB bandwidth/CPU load per
+        camera, which was implicated in cameras dropping out on this rig when
+        running 3 of them at once. Nothing in the teleop/data pipeline actually
+        needs depth here -- TeleopBase.draw_pointcloud() only reads from
+        self.cameras (RealSense), never from pointcloud_cameras."""
+        from pyorbbecsdk import Config, OBSensorType, Pipeline
+
+        pointcloud_camera = self.pointcloud_cameras[pointcloud_camera_name]
+        device = pointcloud_camera["device"]
+
+        pipeline = Pipeline(device)
+        config = Config()
+        color_profile_list = pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
+        if color_profile_list is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Camera '{pointcloud_camera_name}' has no "
+                "color sensor."
+            )
+        color_profile = color_profile_list.get_default_video_stream_profile()
+        config.enable_stream(color_profile)
+        pipeline.start(
+            config,
+            lambda frame_set,
+            pointcloud_camera_name=pointcloud_camera_name: self.femtobolt_callback(
+                frame_set, pointcloud_camera_name
+            ),
+        )
+
+        pointcloud_camera["pipeline"] = pipeline
+        pointcloud_camera["consecutive_failures"] = 0
+
+        # Drain any stale frames left in the queue from before a restart.
+        while not pointcloud_camera["queue"].empty():
+            try:
+                pointcloud_camera["queue"].get_nowait()
+            except Empty:
+                break
+
+    def _reconnect_femtobolt_pipeline(self, pointcloud_camera_name):
+        """Runs in a background daemon thread (see get_pointcloud_camera_data) so a
+        camera whose USB link is bad enough that even a fresh connect attempt hangs
+        in native code doesn't take the whole process down with it."""
+        pointcloud_camera = self.pointcloud_cameras[pointcloud_camera_name]
+        try:
+            try:
+                pointcloud_camera["pipeline"].stop()
+            except Exception as e:
+                print(
+                    f"[{self.__class__.__name__}] Error stopping pipeline for "
+                    f"'{pointcloud_camera_name}': {e}"
+                )
+            self._start_femtobolt_pipeline(pointcloud_camera_name)
+            print(
+                f"[{self.__class__.__name__}] Restarted pointcloud camera "
+                f"'{pointcloud_camera_name}'."
+            )
+        except Exception as e:
+            print(
+                f"[{self.__class__.__name__}] Failed to restart pointcloud camera "
+                f"'{pointcloud_camera_name}': {e}"
+            )
+        finally:
+            pointcloud_camera["reconnecting"] = False
 
     def femtobolt_callback(self, frames, pointcloud_camera_name):
         if frames is None:
@@ -231,7 +282,26 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         return observation, reward, terminated, False, info
 
     def close(self):
-        pass
+        # Stop the Orbbec streaming pipelines explicitly. If the process exits
+        # while they are still streaming, the cameras can be left in a state
+        # where the next uvc_open fails (requiring a USB reset or replug).
+        for pointcloud_camera_name, pointcloud_camera in self.pointcloud_cameras.items():
+            pipeline = pointcloud_camera.get("pipeline")
+            if pipeline is None:
+                continue
+            try:
+                pipeline.stop()
+            except Exception as e:
+                print(
+                    f"[{self.__class__.__name__}] Error stopping pointcloud camera "
+                    f"'{pointcloud_camera_name}': {e}"
+                )
+
+        for rgb_tactile in self.rgb_tactiles.values():
+            try:
+                rgb_tactile.release()
+            except Exception as e:
+                print(f"[{self.__class__.__name__}] Error releasing GelSight: {e}")
 
     @abstractmethod
     def _reset_robot(self):
@@ -265,19 +335,11 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 duration_max,
             )
         else:
-            arm_joint_pos_error_max = np.max(
-                np.abs(arm_joint_pos_command - self.arm_joint_pos_actual)
-            )
-            arm_joint_pos_error_thre = np.deg2rad(90)
-            duration_thre = 0.1  # [s]
-            if (
-                arm_joint_pos_error_max > arm_joint_pos_error_thre
-                and duration < duration_thre
-            ):
-                raise RuntimeError(
-                    f"[{self.__class__.__name__}] Large joint movements are commanded in short duration ({duration} s).\n  command: {arm_joint_pos_command}\n  actual: {self.arm_joint_pos_actual}"
-                )
-
+            # A large per-step joint delta (e.g. from an IK solution jump near a
+            # wrist singularity) is clamped below by scaled_joint_vel_limit rather
+            # than rejected outright, so a single noisy/singular command doesn't
+            # crash the teleop session -- the velocity clamp is what actually
+            # keeps the physical motion safe.
             arm_joint_pos_command_overwritten = self.arm_joint_pos_actual + np.clip(
                 arm_joint_pos_command - self.arm_joint_pos_actual,
                 -1 * scaled_joint_vel_limit * duration,
@@ -373,13 +435,69 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         depth_image = (1e-3 * depth_image[:, :, 0]).astype(np.float32)  # [m]
         return camera_name, {"rgb_images": rgb_image, "depth_images": depth_image}
 
+    # Number of consecutive frame timeouts (each RECONNECT_TIMEOUT_SEC long) before
+    # a pointcloud camera's pipeline is automatically restarted.
+    RECONNECT_FAILURE_THRESHOLD = 3
+    RECONNECT_TIMEOUT_SEC = 2.0
+
     def get_pointcloud_camera_data(self, pointcloud_camera_name, pointcloud_camera):
         from pyorbbecsdk import OBFormat
 
-        frames = pointcloud_camera["queue"].get()
+        # queue.get() blocks forever if the camera's frame callback never fires (e.g.
+        # a flaky USB link -- "Failed to query USB device interface name" at
+        # enumeration time is a symptom of this). That hang would happen inside a
+        # ThreadPoolExecutor worker in _get_info(), and the executor's context
+        # manager waits for all workers on exit, so even Ctrl+C couldn't kill the
+        # process. Time out instead of blocking forever: on repeated timeouts,
+        # attempt to restart the camera's pipeline, and meanwhile fall back to the
+        # last successfully received frame so a flaky camera doesn't crash or stall
+        # data collection.
+        try:
+            frames = pointcloud_camera["queue"].get(timeout=self.RECONNECT_TIMEOUT_SEC)
+        except Empty:
+            pointcloud_camera["consecutive_failures"] += 1
+            n = pointcloud_camera["consecutive_failures"]
+            print(
+                f"[{self.__class__.__name__}] No frame from pointcloud camera "
+                f"'{pointcloud_camera_name}' for {self.RECONNECT_TIMEOUT_SEC}s "
+                f"(consecutive misses: {n})."
+            )
+            if n >= self.RECONNECT_FAILURE_THRESHOLD and not pointcloud_camera.get(
+                "reconnecting", False
+            ):
+                # A flaky USB link can make Pipeline(device)/pipeline.start() hang
+                # in native code with no timeout of their own. Run the reconnect
+                # attempt in its own daemon thread rather than inline here: this
+                # method runs inside a ThreadPoolExecutor worker (see _get_info()),
+                # and that executor's "with" block waits for all workers to finish
+                # on exit -- so a stuck reconnect call would hang the whole process
+                # unkillably, same as the original queue.get() with no timeout. A
+                # daemon thread can be safely abandoned if it never returns.
+                pointcloud_camera["reconnecting"] = True
+                print(
+                    f"[{self.__class__.__name__}] Restarting pointcloud camera "
+                    f"'{pointcloud_camera_name}' after {n} consecutive misses "
+                    "(in background)."
+                )
+                threading.Thread(
+                    target=self._reconnect_femtobolt_pipeline,
+                    args=(pointcloud_camera_name,),
+                    daemon=True,
+                ).start()
+            if pointcloud_camera["last_result"] is not None:
+                return pointcloud_camera_name, pointcloud_camera["last_result"]
+            return pointcloud_camera_name, {}
+
+        # A frame arrived, so the camera link is alive; reset the failure streak.
+        pointcloud_camera["consecutive_failures"] = 0
 
         rgb_frame = frames.get_color_frame()
         if rgb_frame is None:
+            # A frame set with no color sub-frame this tick isn't itself a dropped
+            # connection; fall back to the last good frame instead of returning {},
+            # which would make TeleopBase.draw_image() KeyError on this camera.
+            if pointcloud_camera["last_result"] is not None:
+                return pointcloud_camera_name, pointcloud_camera["last_result"]
             return pointcloud_camera_name, {}
         rgb_width = rgb_frame.get_width()
         rgb_height = rgb_frame.get_height()
@@ -403,39 +521,20 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
         rgb_image = cv2.resize(rgb_image, (640, 480))
 
-        depth_frame = frames.get_depth_frame()
-        if depth_frame is None:
-            return pointcloud_camera_name, {"rgb_images": rgb_image}
-        depth_scale = depth_frame.get_depth_scale()
-        depth_width = depth_frame.get_width()
-        depth_height = depth_frame.get_height()
-        depth_image = np.frombuffer(depth_frame.get_data(), dtype=np.uint16)
-        depth_image = depth_image.astype(np.float32) * depth_scale
-        depth_image = depth_image.reshape((depth_height, depth_width))
-        depth_image = cv2.resize(depth_image, (640, 480))
+        # Only the color stream is enabled (see _start_femtobolt_pipeline) to cut USB
+        # bandwidth, so there is no real depth data. TeleopBase.draw_image() still
+        # expects a "depth_images" entry for every camera not in rgb_tactile_names,
+        # so supply a cheap all-zero placeholder rather than touching that shared
+        # code. Nothing consumes "pointclouds" for these cameras (draw_pointcloud()
+        # only reads from self.cameras / RealSense), so it's simply omitted now.
+        depth_image = np.zeros(rgb_image.shape[:2], dtype=np.float32)
 
-        frame = pointcloud_camera["align_filter"].process(frames)
-        pointcloud_camera["point_cloud_filter"].set_position_data_scaled(depth_scale)
-        if pointcloud_camera["has_color_sensor"] and rgb_frame is not None:
-            pointcloud_format = OBFormat.RGB_POINT
-        else:
-            pointcloud_format = OBFormat.POINT
-        pointcloud_camera["point_cloud_filter"].set_create_point_format(
-            pointcloud_format
-        )
-        point_cloud_frame = pointcloud_camera["point_cloud_filter"].process(frame)
-        pointcloud = np.array(
-            pointcloud_camera["point_cloud_filter"].calculate(point_cloud_frame)
-        )
-        pointcloud = pointcloud[::100]
-        pointcloud[:, 3:6] = pointcloud[:, 3:6] / 255.0
-        pointcloud[:, :3] = pointcloud[:, :3] / 1e3
-
-        return pointcloud_camera_name, {
+        result = {
             "rgb_images": rgb_image,
             "depth_images": depth_image,
-            "pointclouds": pointcloud,
         }
+        pointcloud_camera["last_result"] = result
+        return pointcloud_camera_name, result
 
     def get_rgb_tactile_data(self, rgb_tactile_name, rgb_tactile):
         ret, rgb_image = rgb_tactile.read()

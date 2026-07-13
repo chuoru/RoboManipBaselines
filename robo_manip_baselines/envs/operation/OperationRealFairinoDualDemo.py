@@ -5,11 +5,11 @@ from robo_manip_baselines.common import GraspPhaseBase, PhaseBase
 
 
 class MoveToInitPhase(PhaseBase):
-    """Physically moves the arm/gripper to the reset pose and enables streaming
+    """Physically moves both arms/grippers to the reset pose and enables streaming
     teleop commands. Runs once, as the first pre-motion phase (i.e. after the
     operator has pressed 'n' past InitialTeleopPhase, and right before
     StandbyTeleopPhase begins), rather than immediately at env.reset() -- so the
-    arm does not move on its own before the operator is at the controls."""
+    arms do not move on their own before the operator is at the controls."""
 
     def start(self):
         super().start()
@@ -21,39 +21,48 @@ class MoveToInitPhase(PhaseBase):
 
 class GraspPhase(GraspPhaseBase):
     def set_target(self):
-        self.gripper_joint_pos = np.array([0.0])
+        self.gripper_joint_pos = np.array([0.0, 0.0])
         self.duration = 0.5  # [s]
 
 
-class OperationRealFairinoDemo:
+class OperationRealFairinoDualDemo:
     def __init__(
         self,
-        robot_ip,
+        robot_ip_left,
+        robot_ip_right,
         camera_ids=None,
         gelsight_ids=None,
         pointcloud_camera_ids=None,
-        gripper_hand_type="right",
-        gripper_modbus_port="/dev/ttyUSB0",
+        gripper_hand_type_left="left",
+        gripper_hand_type_right="right",
+        gripper_modbus_port_left="/dev/ttyUSB0",
+        gripper_modbus_port_right="/dev/ttyUSB1",
         dry_run=False,
     ):
-        self.robot_ip = robot_ip
+        self.robot_ip_left = robot_ip_left
+        self.robot_ip_right = robot_ip_right
         self.camera_ids = camera_ids
         self.gelsight_ids = gelsight_ids
         self.pointcloud_camera_ids = pointcloud_camera_ids
-        self.gripper_hand_type = gripper_hand_type
-        self.gripper_modbus_port = gripper_modbus_port
+        self.gripper_hand_type_left = gripper_hand_type_left
+        self.gripper_hand_type_right = gripper_hand_type_right
+        self.gripper_modbus_port_left = gripper_modbus_port_left
+        self.gripper_modbus_port_right = gripper_modbus_port_right
         self.dry_run = dry_run
         super().__init__()
 
     def setup_env(self, render_mode="human"):
         self.env = gym.make(
-            "robo_manip_baselines/RealFairinoDemoEnv-v0",
-            robot_ip=self.robot_ip,
+            "robo_manip_baselines/RealFairinoDualDemoEnv-v0",
+            robot_ip_left=self.robot_ip_left,
+            robot_ip_right=self.robot_ip_right,
             camera_ids=self.camera_ids,
             gelsight_ids=self.gelsight_ids,
             pointcloud_camera_ids=self.pointcloud_camera_ids,
-            gripper_hand_type=self.gripper_hand_type,
-            gripper_modbus_port=self.gripper_modbus_port,
+            gripper_hand_type_left=self.gripper_hand_type_left,
+            gripper_hand_type_right=self.gripper_hand_type_right,
+            gripper_modbus_port_left=self.gripper_modbus_port_left,
+            gripper_modbus_port_right=self.gripper_modbus_port_right,
             dry_run=self.dry_run,
         )
 

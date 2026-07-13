@@ -1,9 +1,21 @@
+# serial_number is the TRACKER's stable hardware serial (starts with "LHR-"),
+# NOT the lighthouse's serial (starts with "LHB-"). Run
+# `python ./teleop/check_vive_devices.py`, wave/move each tracker, and match its
+# position changes to its serial to confirm which one is "left" vs "right".
 0:
   device_params:
     name: left
-    serial_number: LHR-301CBF17
+    serial_number: LHR-904A2704
+    vive_to_eef_frame_rotation:
+      - [0.646851, 0.758117, 0.082715]
+      - [-0.062627, -0.055288, 0.996504]
+      - [0.760040, -0.649770, 0.011716]
 
 1:
   device_params:
     name: right
-    serial_number: LHR-55377A2B
+    serial_number: LHR-208C8961
+    vive_to_eef_frame_rotation:
+      - [0.668575, 0.741556, -0.055695]
+      - [0.033370, 0.044903, 0.998434]
+      - [0.742895, -0.669387, 0.005275]

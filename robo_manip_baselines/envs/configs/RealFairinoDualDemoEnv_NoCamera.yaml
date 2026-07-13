@@ -1,0 +1,11 @@
+robot_ip_left: "192.168.57.2"
+robot_ip_right: "192.168.57.3"
+# Cameras intentionally omitted (all of camera_ids/pointcloud_camera_ids/gelsight_ids
+# default to None), so setup_realsense/setup_femtobolt/setup_gelsight in
+# envs/real/RealEnvBase.py each no-op and never touch the camera hardware. Use this
+# config when the Orbbec cameras are unstable and you want teleop to keep working
+# without them; switch back to RealFairinoDualDemoEnv.yaml once they're stable.
+gripper_hand_type_left: "left"
+gripper_hand_type_right: "right"
+gripper_modbus_port_left: "/dev/ttyUSB0"
+gripper_modbus_port_right: "/dev/ttyUSB1"
