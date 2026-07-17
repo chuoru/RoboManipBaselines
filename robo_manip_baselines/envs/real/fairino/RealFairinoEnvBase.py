@@ -100,7 +100,7 @@ class RealFairinoEnvBase(RealEnvBase):
             ArmConfig(
                 arm_urdf_path=path.join(
                     path.dirname(__file__),
-                    "../../assets/common/robots/fairinofr3/fairino3_v6.urdf",
+                    "../../assets/common/robots/fairino3_v6/fairino3_v6.urdf",
                 ),
                 arm_root_pose=None,
                 ik_eef_joint_id=6,

@@ -1,0 +1,39 @@
+<mujoco model="fairino_cabinet">
+  <include file="./env_fairino_common.xml"/>
+
+  <include file="../../robots/fairino5_v6/fairino5_v6_config.xml"/>
+
+  <include file="../../objects/cabinet/cabinet_config.xml"/>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true" diffuse="0.3 0.3 0.3" castshadow="false"/>
+
+    <camera name="front" mode="fixed" pos="0.5 0.0 1.5" euler="0.0 0.785398 1.5708"/>
+    <camera name="left" mode="fixed" pos="-0.0 -0.75 1.35" euler="0.785398 0.0 0.0"/>
+    <camera name="right" mode="fixed" pos="-0.0 0.75 1.35" euler="-0.785398 0.0 3.1415"/>
+
+    <geom name="floor" size="0 0 0.05" type="plane" material="floor"/>
+
+    <geom name="wall1" type="box" size="10 10 0.01" pos="10 0 10" zaxis="1 0 0" material="wall"/>
+    <geom name="wall2" type="box" size="10 10 0.01" pos="-10 0 10" zaxis="1 0 0" material="wall"/>
+    <geom name="wall3" type="box" size="10 10 0.01" pos="0 10 10" zaxis="0 1 0" material="wall"/>
+    <geom name="wall4" type="box" size="10 10 0.01" pos="0 -10 10" zaxis="0 1 0" material="wall"/>
+
+    <body name="table">
+      <geom type="box" size="0.275 0.5 0.4" pos="0 0 0.4" material="table_base"/>
+      <geom type="box" size="0.275 0.5 0.0075" pos="0 0 0.8075" material="table_plate"/>
+    </body>
+
+    <body name="stand">
+      <geom type="box" size="0.33 0.33 0.4" pos="-0.605 0 0.4" material="stand"/>
+    </body>
+
+    <body name="fairino5_v6_root_frame" pos="-0.605 0.0 0.8">
+      <include file="../../robots/fairino5_v6/fairino5_v6_body.xml"/>
+    </body>
+
+    <body name="cabinet" pos="0.12 -0.05 0.815">
+      <include file="../../objects/cabinet/cabinet_body.xml"/>
+    </body>
+  </worldbody>
+</mujoco>

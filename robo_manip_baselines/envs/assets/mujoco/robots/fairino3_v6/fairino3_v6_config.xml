@@ -1,0 +1,67 @@
+<mujoco model="fairino3_v6_config">
+  <compiler angle="radian" autolimits="true" meshdir="../../assets/meshes"/>
+
+  <asset>
+    <material name="gripper" rgba="0.75 0.75 0.75 1"/>
+    <material name="elp" rgba="0.2 0.2 0.2 1"/>
+
+    <mesh file="fairino3_v6/base_link.stl"/>
+    <mesh file="fairino3_v6/shoulder_link.stl"/>
+    <mesh file="fairino3_v6/upperarm_link.stl"/>
+    <mesh file="fairino3_v6/forearm_link.stl"/>
+    <mesh file="fairino3_v6/wrist1_link.stl"/>
+    <mesh file="fairino3_v6/wrist2_link.stl"/>
+    <mesh file="fairino3_v6/wrist3_link.stl"/>
+
+    <!-- gripper: iai (shared across fairino3_v6/fairino5_v6, see meshes/iai_gripper/) -->
+    <mesh file="iai_gripper/upper_body.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/lower_body.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/left_pinch.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/right_pinch.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/gripper_side.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/square_claw.stl"/>
+    <mesh file="iai_gripper/gripper_cover.stl" scale="0.001 0.001 0.001"/>
+    <mesh file="iai_gripper/connect_part.stl" scale="0.001 0.001 0.001"/>
+
+    <!-- camera: elp (shared across fairino3_v6/fairino5_v6, see meshes/elp/) -->
+    <mesh file="elp/elp_cam.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <default>
+    <default class="fairino3_v6">
+      <joint axis="0 0 1" actuatorgravcomp="true"/>
+      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+      <general biastype="affine"/>
+      <default class="gripper">
+        <joint type="slide" limited="true" range="-0.015 0.015" armature="0.001" damping="0.2" actuatorgravcomp="true" actuatorfrclimited="false"/>
+      </default>
+    </default>
+  </default>
+
+  <contact>
+    <exclude body1="base_link" body2="shoulder_link"/>
+    <pair geom1="right_side" geom2="right_pinch"/>
+    <pair geom1="left_side" geom2="left_pinch"/>
+    <exclude body1="gripper_base" body2="right_pinch_link"/>
+    <exclude body1="gripper_base" body2="left_pinch_link"/>
+  </contact>
+
+  <equality>
+    <joint joint1="right_pinch" joint2="left_pinch" polycoef="0 1 0 0 0" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+  </equality>
+
+  <actuator>
+    <general class="fairino3_v6" name="act1" joint="joint1" ctrlrange="-3.0543 3.0543" gainprm="700" biasprm="0 -900 -180"/>
+    <general class="fairino3_v6" name="act2" joint="joint2" ctrlrange="-4.6251 1.4835" gainprm="1000" biasprm="0 -1200 -240"/>
+    <general class="fairino3_v6" name="act3" joint="joint3" ctrlrange="-2.8274 2.8274" gainprm="1100" biasprm="0 -1300 -260"/>
+    <general class="fairino3_v6" name="act4" joint="joint4" ctrlrange="-4.6251 1.4835" gainprm="160" biasprm="0 -160 -35"/>
+    <general class="fairino3_v6" name="act5" joint="joint5" ctrlrange="-3.0543 3.0543" gainprm="140" biasprm="0 -140 -30"/>
+    <general class="fairino3_v6" name="act6" joint="joint6" ctrlrange="-3.0543 3.0543" gainprm="140" biasprm="0 -140 -30"/>
+    <general class="fairino3_v6" name="gripper_actuator" joint="right_pinch" ctrllimited="true" ctrlrange="-0.015 0.015" gainprm="5" biasprm="0 -5"/>
+  </actuator>
+
+  <sensor>
+    <force name="force_sensor" site="force_sensor"/>
+    <torque name="torque_sensor" site="force_sensor"/>
+  </sensor>
+</mujoco>
