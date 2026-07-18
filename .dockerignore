@@ -1,0 +1,21 @@
+.git
+dataset/
+checkpoint/
+**/__pycache__
+*.pyc
+
+# Vendored submodules not needed for the common install + ACT extra baked
+# into the image. Still available at runtime via the docker-compose bind
+# mount for manual installation of other policy extras.
+third_party/3D-Diffusion-Policy
+third_party/FlowPolicy
+third_party/ManiFlow_Policy
+third_party/tacto
+third_party/lerobot
+third_party/pyorbbecsdk
+third_party/roboagent
+third_party/eipl
+third_party/gello_software
+third_party/fairino-python-sdk
+third_party/linkerhand-python-sdk
+third_party/YCB_sim

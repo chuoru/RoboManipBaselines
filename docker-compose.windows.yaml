@@ -1,0 +1,40 @@
+# Windows-host compose file: run `docker compose -f docker-compose.windows.yaml up -d`
+# (or `run --rm robo_manip_baselines bash` for an interactive shell).
+#
+# Prerequisites on the Windows host:
+#   1. Docker Desktop with the WSL2 backend and NVIDIA GPU support enabled
+#      (Settings > Resources > WSL Integration, plus the NVIDIA driver's
+#      built-in WSL2/Docker Desktop GPU support -- no separate container
+#      toolkit install needed on Windows).
+#   2. An X server, e.g. VcXsrv (https://sourceforge.net/projects/vcxsrv),
+#      launched via XLaunch with "Disable access control" checked. The
+#      container's DISPLAY (baked into the image as host.docker.internal:0.0)
+#      depends on this being reachable and unauthenticated.
+#
+# USB devices (SpaceMouse, GELLO, Femto Bolt/RealSense cameras, real robot
+# controllers) are NOT passed through automatically -- Docker Desktop on
+# Windows has no native USB passthrough. To use one, attach it to WSL2 first
+# with usbipd-win (`usbipd wsl attach --busid <id>`), then uncomment and
+# adjust the `devices:` block below to match the resulting /dev/ path.
+
+services:
+  robo_manip_baselines:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: robo_manip_baselines:latest
+    container_name: robo_manip_baselines
+    stdin_open: true
+    tty: true
+    working_dir: /workspace/RoboManipBaselines/robo_manip_baselines
+    volumes:
+      - .:/workspace/RoboManipBaselines
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
