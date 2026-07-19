@@ -1,0 +1,53 @@
+# Native Linux host compose file: run `docker compose -f docker-compose.linux.yaml up -d`
+# (or `run --rm robo_manip_baselines bash` for an interactive shell).
+#
+# Prerequisites on the Linux host:
+#   1. NVIDIA Container Toolkit installed and configured for Docker:
+#        sudo nvidia-ctk runtime configure --runtime=docker
+#        sudo systemctl restart docker
+#      (unlike Docker Desktop on Windows, native Linux Docker has no built-in
+#      GPU passthrough -- this is what makes the `deploy.resources` block
+#      below actually reach the host GPUs).
+#   2. Grant the container access to your X server once per session:
+#        xhost +local:docker
+#      DISPLAY is passed through from the host shell (not baked into the
+#      image like the Windows build's host.docker.internal:0.0), and the
+#      host's X11 socket is bind-mounted below.
+#
+# GPU note: this pulls torch==2.10.0 from the cu128 wheel index (same as the
+# Windows build, see Dockerfile). If the host driver is older than the
+# cu128/cu126 minimum (roughly >=570 / >=560), `torch.cuda.is_available()`
+# may still work via CUDA minor-version compatibility, or may fail with a
+# "CUDA driver version is insufficient" error -- if so, update the host
+# NVIDIA driver rather than editing this file.
+#
+# USB devices (SpaceMouse, GELLO, Femto Bolt/RealSense cameras, real robot
+# controllers) can be bound directly on native Linux -- no WSL-style
+# passthrough workaround needed. Uncomment and adjust the `devices:` block
+# below to match the device's /dev path, and make sure your user is in the
+# `dialout` group (or the device node's owning group) for serial access.
+
+services:
+  robo_manip_baselines:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: robo_manip_baselines:latest
+    container_name: robo_manip_baselines
+    stdin_open: true
+    tty: true
+    working_dir: /workspace/RoboManipBaselines/robo_manip_baselines
+    environment:
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - .:/workspace/RoboManipBaselines
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
