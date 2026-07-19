@@ -1,45 +1,91 @@
-"""Calibrate ViveInputDevice's vive_to_eef_frame_rotation for one arm.
+"""Calibrate ViveInputDevice's vive_to_eef_frame_rotation from real tracker rotation.
 
-Why this is needed: ViveInputDevice.set_command_data() (see teleop/ViveInputDevice.py)
-computes the tracker's motion relative to the tracker's OWN orientation at the moment
-teleop was enabled, then rotates that delta by vive_to_eef_frame_rotation before
-applying it as a motion relative to the EEF's OWN orientation at that same moment. For
-"move the tracker this way" to consistently mean "move the gripper the equivalent way"
-regardless of how the tracker happens to be held, the two enable-time orientations
-must be related by a fixed rotation R:
+vive_to_eef_frame_rotation conjugates a tracker-local *rotation* delta into the
+EEF's own local TCP/tool frame (see ViveInputDevice.set_command_data():
+adjusted_rotation_delta = R @ delta_vive_rotation @ R.T, then composed onto
+eef_se3_at_enable.rotation). Like vive_to_eef_frame_rotation's old role for
+translation, this is purely a TCP-local relationship -- it doesn't depend on the
+robot's base orientation or current pose, so no forward kinematics or hardware
+connection is needed to calibrate it.
 
-    R = (EEF rotation at the arm's init pose)^T @ (tracker rotation as held at the
-         start of teleop)
+Trying to calibrate this by just holding the tracker in "the same orientation as
+the gripper" (the old approach) is hard to get precise -- a few degrees of
+mismatch can visibly cross-couple axes (e.g. yaw motion coming out as pitch). This
+script instead has you physically ROTATE the tracker about the three axes you
+want to call "roll"/"pitch"/"yaw", measures the real rotation axis for each, and
+fits the best proper rotation matrix via the orthogonal Procrustes problem
+(SVD-based Kabsch) -- the same robust approach used for translation in
+calibrate_vive_world_frame.py.
 
-This holds as a constant (rather than something that has to be recalibrated every
-session) because the arm always begins teleop from the same init pose (see
-MoveToInitPhase in envs/operation/OperationRealFairinoDualDemo.py) and because you
-should hold the tracker the same way each time you begin teleop.
-
-This script computes R using the robot's actual forward kinematics (no hardware
-connection needed -- it builds the env with dry_run=True) and the tracker's live
-orientation from libsurvive, and prints the result ready to paste into
-teleop/configs/ViveDual.yaml (or Vive.yaml).
+--roll_axis/--pitch_axis/--yaw_axis (each one of +x/-x/+y/-y/+z/-z) say what each
+test rotation should correspond to in TCP-local coordinates. Defaults assume a TCP
+frame where +z is forward, +y is left, +x is down: roll (twisting the wrist like a
+screwdriver, about the forward axis) = +z; pitch (nodding, about the left/right
+axis) = -y; yaw (turning, about the up/down axis) = -x. Override them if your
+robot's TCP convention differs, or if these labels don't match how you think about
+the three rotations.
 
 Usage:
-    python ./teleop/calibrate_vive_rotation.py --side left --serial_number LHR-904A2704
-
-Caveat: this assumes the robot base frame's axes and the lighthouses' world frame
-axes are roughly aligned the way you intuitively expect (e.g. both "facing" the
-workspace the same way). If motion still looks off after applying the printed R,
-that residual mismatch is between those two frames, not between the tracker and the
-EEF, and needs a manual correction on top of this result.
+    python ./teleop/calibrate_vive_rotation.py --side right --serial_number LHR-208C8961
 """
 
 import argparse
 import time
 
-import gymnasium as gym
 import numpy as np
 import pinocchio as pin
 
-import robo_manip_baselines  # noqa: F401  (registers gym envs)
-from robo_manip_baselines.common import MotionManager
+AXIS_VECTORS = {
+    "+x": np.array([1.0, 0.0, 0.0]),
+    "-x": np.array([-1.0, 0.0, 0.0]),
+    "+y": np.array([0.0, 1.0, 0.0]),
+    "-y": np.array([0.0, -1.0, 0.0]),
+    "+z": np.array([0.0, 0.0, 1.0]),
+    "-z": np.array([0.0, 0.0, -1.0]),
+}
+
+
+def wait_for_tracker(pysurvive, ctx, serial_number, wait_sec):
+    known_serials = set()
+    start = time.time()
+    while time.time() - start < wait_sec:
+        obj = ctx.NextUpdated()
+        if obj is not None:
+            found_serial = pysurvive.simple_serial_number(obj.ptr)
+            if isinstance(found_serial, bytes):
+                found_serial = found_serial.decode()
+            known_serials.add(found_serial)
+            if found_serial == serial_number:
+                return obj
+        time.sleep(0.01)
+    raise RuntimeError(
+        f"[calibrate] Tracker with serial '{serial_number}' was not detected "
+        f"within {wait_sec}s. Detected serials so far: {sorted(known_serials)}"
+    )
+
+
+def capture_rotation(tracker_object, label):
+    input(f"[calibrate] {label} Press Enter when ready and holding steady.")
+    pose, timecode = tracker_object.Pose()
+    if timecode <= 0:
+        raise RuntimeError(
+            "[calibrate] Tracker has no valid pose yet -- make sure it's visible "
+            "to both lighthouses and retry."
+        )
+    # libsurvive quaternions are stored as (w, x, y, z).
+    return pin.Quaternion(*pose.Rot[:4]).toRotationMatrix()
+
+
+def fit_rotation(measured_local, desired_local):
+    """Best proper rotation R (measured_local -> desired_local) via Kabsch/SVD.
+
+    measured_local, desired_local: (3, N) arrays of corresponding unit vectors.
+    """
+    covariance = desired_local @ measured_local.T
+    u, _, vt = np.linalg.svd(covariance)
+    d = np.sign(np.linalg.det(u @ vt))
+    correction = np.diag([1.0, 1.0, d])
+    return u @ correction @ vt
 
 
 def main():
@@ -51,94 +97,85 @@ def main():
         help="Tracker's hardware serial number (e.g. LHR-904A2704), from "
         "teleop/check_vive_devices.py",
     )
-    parser.add_argument(
-        "--wait_sec",
-        type=float,
-        default=10.0,
-        help="How long to wait for the tracker to be detected after you press Enter",
-    )
+    parser.add_argument("--roll_axis", default="+z", choices=AXIS_VECTORS.keys())
+    parser.add_argument("--pitch_axis", default="-y", choices=AXIS_VECTORS.keys())
+    parser.add_argument("--yaw_axis", default="-x", choices=AXIS_VECTORS.keys())
+    parser.add_argument("--wait_sec", type=float, default=10.0)
     args = parser.parse_args()
-    side_idx = 0 if args.side == "left" else 1
-
-    print("[calibrate] Building kinematic model (dry-run, no hardware connection)...")
-    env = gym.make(
-        "robo_manip_baselines/RealFairinoDualDemoEnv-v0",
-        robot_ip_left="0.0.0.0",
-        robot_ip_right="0.0.0.0",
-        camera_ids=None,
-        gelsight_ids=None,
-        dry_run=True,
-    )
-    env.reset()
-    motion_manager = MotionManager(env)
-    eef_rotation = motion_manager.body_manager_list[side_idx].current_se3.rotation.copy()
-    env.close()
-    print(f"[calibrate] EEF rotation at init pose ({args.side} arm):\n{eef_rotation}\n")
 
     import pysurvive
 
     print("[calibrate] Connecting to libsurvive...")
     ctx = pysurvive.SimpleContext([])
     try:
-        print(
-            f"[calibrate] Hold the tracker (serial {args.serial_number}) the SAME "
-            "way you will hold it right before starting real teleop -- this is the "
-            "posture that gets captured as the anchor pose every time teleop is "
-            "enabled.\nPress Enter when you're holding it steady in that posture."
+        print(f"[calibrate] Looking for tracker {args.serial_number}...")
+        tracker_object = wait_for_tracker(
+            pysurvive, ctx, args.serial_number, args.wait_sec
         )
-        input()
+        print("[calibrate] Tracker found.\n")
 
-        known_serials = set()
-        tracker_object = None
-        start = time.time()
-        while time.time() - start < args.wait_sec:
-            obj = ctx.NextUpdated()
-            if obj is not None:
-                serial_number = pysurvive.simple_serial_number(obj.ptr)
-                if isinstance(serial_number, bytes):
-                    serial_number = serial_number.decode()
-                known_serials.add(serial_number)
-                if serial_number == args.serial_number:
-                    tracker_object = obj
-                    break
-            time.sleep(0.01)
+        r_ref = capture_rotation(
+            tracker_object,
+            "Hold the tracker in your normal starting posture (reference point).",
+        )
 
-        if tracker_object is None:
-            raise RuntimeError(
-                f"[calibrate] Tracker with serial '{args.serial_number}' was not "
-                f"detected within {args.wait_sec}s. Detected serials so far: "
-                f"{sorted(known_serials)}"
+        local_axes = []
+        for label, axis, instruction in (
+            ("roll", args.roll_axis, "twist it about its own forward axis, like turning a screwdriver"),
+            ("pitch", args.pitch_axis, "tilt/nod it, like nodding your head"),
+            ("yaw", args.yaw_axis, "turn it side to side, like shaking your head"),
+        ):
+            r_i = capture_rotation(
+                tracker_object,
+                f"Now rotate the tracker ~45-90deg for '{label}' (TCP {axis}) -- "
+                f"{instruction} -- then hold still.",
             )
-
-        pose, timecode = tracker_object.Pose()
-        if timecode <= 0:
-            raise RuntimeError(
-                "[calibrate] Tracker was detected but has no valid pose yet -- "
-                "make sure it's visible to both lighthouses and retry."
-            )
-
-        # libsurvive quaternions are stored as (w, x, y, z), matching
-        # MathUtils.py's convention elsewhere in this codebase.
-        tracker_rotation = pin.Quaternion(*pose.Rot[:4]).toRotationMatrix()
+            delta_local = r_ref.T @ r_i
+            rotvec = pin.log3(delta_local)
+            angle = np.linalg.norm(rotvec)
+            if np.rad2deg(angle) < 15.0:
+                raise RuntimeError(
+                    f"[calibrate] Barely any rotation detected for '{label}' "
+                    f"({np.rad2deg(angle):.1f} deg) -- rotate it further and retry."
+                )
+            local_axes.append(rotvec / angle)
+            print(f"[calibrate]   -> rotated {np.rad2deg(angle):.1f} deg\n")
     except KeyboardInterrupt:
         print("\n[calibrate] Interrupted by Ctrl+C.")
         return
     finally:
-        # Must run on every exit path (including Ctrl+C/errors above), or
-        # libsurvive's background USB polling thread keeps the process alive.
         pysurvive.simple_close(ctx.ptr)
 
-    print(f"[calibrate] Tracker rotation:\n{tracker_rotation}\n")
+    measured_local = np.stack(local_axes, axis=1)  # (3, 3): columns = roll,pitch,yaw
 
-    rotation = eef_rotation.T @ tracker_rotation
+    # Target axes directly in TCP-local coordinates -- vive_to_eef_frame_rotation's
+    # output already *is* the TCP-local frame, no base-frame/FK conversion needed.
+    desired_local = np.stack(
+        [
+            AXIS_VECTORS[args.roll_axis],
+            AXIS_VECTORS[args.pitch_axis],
+            AXIS_VECTORS[args.yaw_axis],
+        ],
+        axis=1,
+    )
+
+    rotation = fit_rotation(measured_local, desired_local)
+
+    achieved_local = rotation @ measured_local
+    print("[calibrate] Fit quality (should be close to 0 deg):")
+    for label, i in (("roll", 0), ("pitch", 1), ("yaw", 2)):
+        cos_angle = np.clip(np.dot(achieved_local[:, i], desired_local[:, i]), -1.0, 1.0)
+        angle_deg = np.rad2deg(np.arccos(cos_angle))
+        print(f"    {label}: {angle_deg:.2f} deg error")
 
     print(
-        f"[calibrate] Add this under device_params for the {args.side} arm in "
-        "teleop/configs/ViveDual.yaml:\n"
+        f"\n[calibrate] Add this under device_params for the {args.side} arm in "
+        "teleop/configs/ViveDual.yaml (as a sibling of device_params, NOT nested "
+        "inside it):\n"
     )
-    print("    vive_to_eef_frame_rotation:")
+    print("  vive_to_eef_frame_rotation:")
     for row in rotation:
-        print(f"      - [{row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}]")
+        print(f"    - [{row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}]")
 
 
 if __name__ == "__main__":

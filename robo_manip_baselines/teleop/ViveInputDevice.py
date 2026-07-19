@@ -31,6 +31,17 @@ class ViveInputDevice(InputDeviceBase):
     # tracker is treated as lost (out of lighthouse view, powered off, etc.).
     TRACKING_TIMEOUT = 0.5  # [s]
 
+    # A tracker's pose is noisy for a brief moment right after it's first seen
+    # (libsurvive's MPFIT pose solver hasn't converged yet -- this is worse right
+    # after the lighthouses/tracker have been physically moved). Anchoring
+    # enabled_teleop on that first noisy pose, then having it snap to the true
+    # pose a few frames later, looks exactly like a startup jump even though the
+    # tracker never physically moved -- so we require the pose to stay settled
+    # (near-stationary) for this long before anchoring.
+    POSE_SETTLE_TIME = 0.5  # [s]
+    POSE_SETTLE_POS_TOLERANCE = 0.02  # [m]
+    POSE_SETTLE_ROT_TOLERANCE = np.deg2rad(5.0)  # [rad]
+
     # A single libsurvive context talks to all USB-connected lighthouses/trackers,
     # so it must be created once and shared across all ViveInputDevice instances
     # (e.g. the two trackers of a dual-arm setup) rather than once per instance.
@@ -55,6 +66,7 @@ class ViveInputDevice(InputDeviceBase):
         pos_scale=1.0,
         gripper_scale=5.0,
         vive_to_eef_frame_rotation=None,
+        vive_world_to_base_frame_rotation=None,
         gripper_key_bindings=None,
     ):
         super().__init__()
@@ -64,6 +76,9 @@ class ViveInputDevice(InputDeviceBase):
         self.serial_number = device_params["serial_number"]
         self.pos_scale = pos_scale
         self.gripper_scale = gripper_scale
+        # Rotates a tracker-local *rotation* delta into the EEF's own local (TCP)
+        # frame -- see set_command_data(). Depends on how the tracker happens to
+        # be held each session; calibrate with calibrate_vive_axes.py.
         if vive_to_eef_frame_rotation is None:
             self.vive_to_eef_frame_rotation = np.eye(3)
         else:
@@ -71,6 +86,18 @@ class ViveInputDevice(InputDeviceBase):
                 vive_to_eef_frame_rotation, dtype=np.float64
             )
         assert self.vive_to_eef_frame_rotation.shape == (3, 3)
+        # Rotates a raw Vive-room-frame *translation* delta into the robot's base
+        # frame -- see set_command_data(). This is a fixed physical relationship
+        # between the lighthouses and the robot base (not how the tracker is
+        # held), so unlike vive_to_eef_frame_rotation it does not need
+        # recalibrating each session. Calibrate with calibrate_vive_world_frame.py.
+        if vive_world_to_base_frame_rotation is None:
+            self.vive_world_to_base_frame_rotation = np.eye(3)
+        else:
+            self.vive_world_to_base_frame_rotation = np.array(
+                vive_world_to_base_frame_rotation, dtype=np.float64
+            )
+        assert self.vive_world_to_base_frame_rotation.shape == (3, 3)
 
         self.gripper_key_bindings = gripper_key_bindings
         self.keyboard_state = None
@@ -94,6 +121,8 @@ class ViveInputDevice(InputDeviceBase):
         self.has_announced_ready = False
         self._last_timecode = None
         self._last_update_wall_time = None
+        self._settle_start_se3 = None
+        self._settle_start_wall_time = None
 
         if self.connected:
             return
@@ -169,17 +198,41 @@ class ViveInputDevice(InputDeviceBase):
         if self.state is None:
             self.enabled_teleop = False
             self.has_announced_ready = False
+            self._settle_start_se3 = None
+            self._settle_start_wall_time = None
             return
 
         # Vive Trackers have no trigger to gate teleop on, so enable teleop as soon
-        # as the tracker is visible to the lighthouses and anchor on that pose.
+        # as the tracker's pose has settled (see POSE_SETTLE_TIME) and anchor on
+        # that settled pose.
         if not self.enabled_teleop:
-            self.enabled_teleop = True
-            self.vive_se3_at_enable = self.state["se3"].copy()
-            self.eef_se3_at_enable = self.arm_manager.current_se3.copy()
-            print(
-                f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}'."
-            )
+            current_se3 = self.state["se3"]
+            now = time.time()
+            if self._settle_start_se3 is None:
+                self._settle_start_se3 = current_se3.copy()
+                self._settle_start_wall_time = now
+            else:
+                pos_diff = np.linalg.norm(
+                    current_se3.translation - self._settle_start_se3.translation
+                )
+                rot_diff = np.linalg.norm(
+                    pin.log3(self._settle_start_se3.rotation.T @ current_se3.rotation)
+                )
+                if (
+                    pos_diff > self.POSE_SETTLE_POS_TOLERANCE
+                    or rot_diff > self.POSE_SETTLE_ROT_TOLERANCE
+                ):
+                    # Pose moved (or is still converging) -- restart the settle
+                    # window from this new pose.
+                    self._settle_start_se3 = current_se3.copy()
+                    self._settle_start_wall_time = now
+                elif (now - self._settle_start_wall_time) >= self.POSE_SETTLE_TIME:
+                    self.enabled_teleop = True
+                    self.vive_se3_at_enable = current_se3.copy()
+                    self.eef_se3_at_enable = self.arm_manager.current_se3.copy()
+                    print(
+                        f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}'."
+                    )
 
     def _read_survive(self):
         with ViveInputDevice._object_registry_lock:
@@ -235,19 +288,36 @@ class ViveInputDevice(InputDeviceBase):
         if (not self.enabled_teleop) or (self.state is None):
             return
 
-        # Set arm command
-        delta_vive_se3 = self.vive_se3_at_enable.inverse() * self.state["se3"]
-        adjusted_delta_vive_se3 = pin.SE3(
+        # Set arm command.
+        #
+        # Translation is computed directly in the robot's base frame: the raw
+        # Vive-room-frame position delta (independent of how the tracker happens
+        # to be oriented/held) is rotated into base frame and added straight onto
+        # the EEF's enable-time base-frame position. This keeps "move the tracker
+        # forward" meaning "move the tool forward relative to the body" even if
+        # the tool itself is tilted, instead of tracking the tool's own (possibly
+        # tilted) local frame.
+        raw_translation_delta = (
+            self.state["se3"].translation - self.vive_se3_at_enable.translation
+        )
+        target_translation = self.eef_se3_at_enable.translation + self.pos_scale * (
+            self.vive_world_to_base_frame_rotation @ raw_translation_delta
+        )
+
+        # Rotation still tracks the tool's own local frame: a tracker rotation
+        # delta (relative to how it was held at enable time) is applied as an
+        # EEF-local rotation delta relative to the tool's enable-time orientation.
+        delta_vive_rotation = (
+            self.vive_se3_at_enable.rotation.T @ self.state["se3"].rotation
+        )
+        adjusted_rotation_delta = (
             self.vive_to_eef_frame_rotation
-            @ delta_vive_se3.rotation
-            @ self.vive_to_eef_frame_rotation.T,
-            self.vive_to_eef_frame_rotation @ delta_vive_se3.translation,
+            @ delta_vive_rotation
+            @ self.vive_to_eef_frame_rotation.T
         )
-        scaled_delta_vive_se3 = pin.SE3(
-            adjusted_delta_vive_se3.rotation,
-            self.pos_scale * adjusted_delta_vive_se3.translation,
-        )
-        target_se3 = self.eef_se3_at_enable * scaled_delta_vive_se3
+        target_rotation = self.eef_se3_at_enable.rotation @ adjusted_rotation_delta
+
+        target_se3 = pin.SE3(target_rotation, target_translation)
 
         self.arm_manager.set_command_eef_pose(target_se3)
 

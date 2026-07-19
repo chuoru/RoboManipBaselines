@@ -3,10 +3,12 @@ import time
 from os import path
 
 import numpy as np
+import pinocchio as pin
 from fairino import Robot
 from gymnasium.spaces import Box, Dict
 
 from robo_manip_baselines.common import ArmConfig
+from robo_manip_baselines.common.utils.MathUtils import get_se3_from_pose
 from robo_manip_baselines.teleop import (
     GelloInputDevice,
     KeyboardInputDevice,
@@ -110,6 +112,9 @@ class RealFairinoDualEnvBase(RealEnvBase):
 
         self.init_qpos = init_qpos
         self.dry_run = dry_run
+        # Lazily built (model, data) pairs, used only to print the commanded EEF
+        # position alongside DRY RUN joint commands so it can be checked by eye.
+        self._dry_run_pin_models = [None, None]
         self.command_smoothing_alpha = command_smoothing_alpha
         # TODO: Verify against the official FR3 max joint speed before running on real hardware.
         self.joint_vel_limit = np.deg2rad(90)  # [rad/s]
@@ -194,29 +199,50 @@ class RealFairinoDualEnvBase(RealEnvBase):
                     f"[{self.__class__.__name__}] Finish connecting the {side_name} Fairino arm."
                 )
 
-                print(
-                    f"[{self.__class__.__name__}] Start connecting the {side_name} LinkerHand gripper."
-                )
-                try:
-                    from LinkerHand.linker_hand_api import LinkerHandApi
-                except ImportError as e:
-                    raise RuntimeError(
-                        f"[{self.__class__.__name__}] Failed to import LinkerHand. "
-                        f"Please ensure the LinkerHand package is installed. Error: {e}"
+                if self.gripper_modbus_ports[side] is None:
+                    # Lets the arm run for real while this side's gripper is
+                    # skipped, e.g. while a broken gripper/cable is being
+                    # repaired -- see _set_action()/move_to_init_pose(), which
+                    # skip commanding self.grippers[side] when it's None, and
+                    # _get_obs(), whose try/except around grippers[side].get_state()
+                    # already falls back to the last known position on failure.
+                    print(
+                        f"[{self.__class__.__name__}] gripper_modbus_port_{side_name} "
+                        f"is None: skipping the {side_name} LinkerHand gripper "
+                        "connection. The arm will still move; this hand's gripper "
+                        "will stay uncommanded."
                     )
-                self.grippers[side] = LinkerHandApi(
-                    hand_type=self.gripper_hand_types[side],
-                    hand_joint="O6",
-                    modbus=self.gripper_modbus_ports[side],
-                )
-                gripper_finger_order = self.grippers[side].get_finger_order()
-                self.gripper_num_joints[side] = len(gripper_finger_order)
-                self.gripper_thumb_abduction_idx[side] = gripper_finger_order.index(
-                    "thumb_cmc_yaw"
-                )
-                print(
-                    f"[{self.__class__.__name__}] Finish connecting the {side_name} LinkerHand gripper."
-                )
+                    # O6 hand layout (both hands share it): 6 joints, thumb_cmc_yaw
+                    # is the 2nd finger_order entry -- see get_finger_order() in
+                    # third_party/linkerhand-python-sdk. Only used by
+                    # _gripper_pose(), which is never called while
+                    # self.grippers[side] is None.
+                    self.gripper_num_joints[side] = 6
+                    self.gripper_thumb_abduction_idx[side] = 1
+                else:
+                    print(
+                        f"[{self.__class__.__name__}] Start connecting the {side_name} LinkerHand gripper."
+                    )
+                    try:
+                        from LinkerHand.linker_hand_api import LinkerHandApi
+                    except ImportError as e:
+                        raise RuntimeError(
+                            f"[{self.__class__.__name__}] Failed to import LinkerHand. "
+                            f"Please ensure the LinkerHand package is installed. Error: {e}"
+                        )
+                    self.grippers[side] = LinkerHandApi(
+                        hand_type=self.gripper_hand_types[side],
+                        hand_joint="O6",
+                        modbus=self.gripper_modbus_ports[side],
+                    )
+                    gripper_finger_order = self.grippers[side].get_finger_order()
+                    self.gripper_num_joints[side] = len(gripper_finger_order)
+                    self.gripper_thumb_abduction_idx[side] = (
+                        gripper_finger_order.index("thumb_cmc_yaw")
+                    )
+                    print(
+                        f"[{self.__class__.__name__}] Finish connecting the {side_name} LinkerHand gripper."
+                    )
 
         # Connect to RealSense, Orbbec (femtobolt), and GelSight (only in
         # non-dry-run mode)
@@ -470,15 +496,41 @@ class RealFairinoDualEnvBase(RealEnvBase):
                     arm_joint_pos
                 )
 
-                self.grippers[side].finger_move(
-                    pose=self._gripper_pose(side, gripper_percent_closed)
-                )
+                if self.grippers[side] is not None:
+                    self.grippers[side].finger_move(
+                        pose=self._gripper_pose(side, gripper_percent_closed)
+                    )
 
         self._motion_enabled = True
 
         print(
             f"[{self.__class__.__name__}] Finish moving the robots to the reset position."
         )
+
+    def _dry_run_eef_position(self, side, arm_joint_pos_rad):
+        """Forward-kinematics helper used only to print the commanded EEF
+        position (base frame, meters) alongside DRY RUN joint commands, since raw
+        joint angles alone can't be checked by eye against tracker motion."""
+        if self._dry_run_pin_models[side] is None:
+            body_config = self.body_config_list[side]
+            model = pin.buildModelFromUrdf(body_config.arm_urdf_path)
+            if body_config.exclude_joint_names is not None:
+                exclude_joint_ids = [
+                    model.getJointId(name)
+                    for name in body_config.exclude_joint_names
+                    if model.existJointName(name)
+                ]
+                model = pin.buildReducedModel(
+                    model, exclude_joint_ids, np.zeros(model.nq)
+                )
+            if body_config.arm_root_pose is not None:
+                arm_root_se3 = get_se3_from_pose(body_config.arm_root_pose)
+                model.jointPlacements[1] = arm_root_se3.act(model.jointPlacements[1])
+            self._dry_run_pin_models[side] = (model, model.createData())
+
+        model, data = self._dry_run_pin_models[side]
+        pin.forwardKinematics(model, data, arm_joint_pos_rad)
+        return data.oMi[self.body_config_list[side].ik_eef_joint_id].translation
 
     def _set_action(self, action, duration=None, joint_vel_limit_scale=0.5, wait=False):
         start_time = time.time()
@@ -523,7 +575,14 @@ class RealFairinoDualEnvBase(RealEnvBase):
             exaxis_list = [float(x) for x in EXAXIS_POS]
 
             if self.dry_run:
+                eef_pos = self._dry_run_eef_position(
+                    side, self._filtered_arm_joint_pos_command[side]
+                )
                 print(f"[{self.__class__.__name__}] [DRY RUN] side={side} ServoJ command:")
+                print(
+                    "  EEF position (base frame) [m]: "
+                    f"[{eef_pos[0]:+.4f}, {eef_pos[1]:+.4f}, {eef_pos[2]:+.4f}]"
+                )
                 print(f"  Joint positions [deg]: {joint_pos_list}")
                 print(f"  Gripper: {gripper_percent_closed:.1f}% closed")
                 self.arm_joint_pos_actual[self._arm_slice(side)] = np.deg2rad(
@@ -564,9 +623,10 @@ class RealFairinoDualEnvBase(RealEnvBase):
                 )
                 self._check_fr_code(fr_code)
 
-                self.grippers[side].finger_move(
-                    pose=self._gripper_pose(side, gripper_percent_closed)
-                )
+                if self.grippers[side] is not None:
+                    self.grippers[side].finger_move(
+                        pose=self._gripper_pose(side, gripper_percent_closed)
+                    )
 
         # Wait
         elapsed_duration = time.time() - start_time

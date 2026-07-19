@@ -2,20 +2,46 @@
 # NOT the lighthouse's serial (starts with "LHB-"). Run
 # `python ./teleop/check_vive_devices.py`, wave/move each tracker, and match its
 # position changes to its serial to confirm which one is "left" vs "right".
+#
+# vive_to_eef_frame_rotation and vive_world_to_base_frame_rotation are siblings of
+# device_params (NOT nested inside it) -- ViveInputDevice.__init__ takes them as
+# separate keyword arguments, so nesting them under device_params would silently
+# make them do nothing.
+#
+# vive_to_eef_frame_rotation (per-arm) calibrates ROTATION control only -- see
+# teleop/calibrate_vive_axes.py.
+#
+# vive_world_to_base_frame_rotation controls TRANSLATION: a fixed physical
+# room-to-base-frame relationship (not tracker-hold-dependent, so unlike
+# vive_to_eef_frame_rotation it's not re-derived each session) -- see
+# teleop/calibrate_vive_world_frame.py. The left and right robots here are
+# mounted facing each other (roughly 180 deg apart), so their base frames are
+# oriented very differently in the room -- each side has its OWN calibrated
+# value below, not a shared one.
 0:
   device_params:
     name: left
     serial_number: LHR-904A2704
-    vive_to_eef_frame_rotation:
-      - [0.646851, 0.758117, 0.082715]
-      - [-0.062627, -0.055288, 0.996504]
-      - [0.760040, -0.649770, 0.011716]
+  pos_scale: 0.9
+  vive_to_eef_frame_rotation:
+    - [-0.017408, -0.038467, -0.999108]
+    - [-0.998416, 0.054132, 0.015312]
+    - [0.053495, 0.997793, -0.039348]
+  vive_world_to_base_frame_rotation:
+    - [0.234888, -0.889556, -0.391813]
+    - [0.166570, -0.360291, 0.917848]
+    - [-0.957644, -0.280856, 0.063545]
 
 1:
   device_params:
     name: right
     serial_number: LHR-208C8961
-    vive_to_eef_frame_rotation:
-      - [0.668575, 0.741556, -0.055695]
-      - [0.033370, 0.044903, 0.998434]
-      - [0.742895, -0.669387, 0.005275]
+  pos_scale: 0.9
+  vive_to_eef_frame_rotation:
+    - [-0.040963, 0.055221, 0.997634]
+    - [0.998547, -0.032731, 0.042812]
+    - [0.035018, 0.997938, -0.053800]
+  vive_world_to_base_frame_rotation:
+    - [-0.053957, -0.562181, 0.825252]
+    - [0.226698, -0.811772, -0.538176]
+    - [0.972469, 0.158045, 0.171246]
