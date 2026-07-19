@@ -37,10 +37,22 @@ WORKDIR /workspace/RoboManipBaselines
 # CUDA-enabled torch wheels, and --extra-index-url only supplements rather
 # than replaces it, so pip can silently mix in a different CUDA build than
 # the one requested here.
+#
+# TORCH_VERSION/TORCHVISION_VERSION/TORCHCODEC_VERSION default to
+# pyproject.toml's pins. Override all three together (with a matching
+# TORCH_INDEX_URL) to target an older driver that can't run the default
+# build -- e.g. torch==2.5.1/torchvision==0.20.1/torchcodec==0.1.1 from the
+# cu121 index for a host capped at CUDA 12.2. Whatever is set here is
+# reasserted below in its own step, since pip would otherwise resolve
+# pyproject.toml's exact torch==2.10.0 pin during the ".[act]" install and
+# silently undo an override.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+ARG TORCH_VERSION=2.10.0
+ARG TORCHVISION_VERSION=0.25.0
+ARG TORCHCODEC_VERSION=0.10.0
 RUN python3 -m pip install --no-cache-dir --upgrade pip \
     && python3 -m pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} \
-         torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0
+         torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchcodec==${TORCHCODEC_VERSION}
 
 # .dockerignore trims this to what the common install + ACT extra need
 # (drops unused vendored third_party/* submodules to keep the build fast).
@@ -48,5 +60,15 @@ COPY . .
 
 RUN python3 -m pip install --no-cache-dir -e ".[act]" \
     && cd third_party/act/detr && python3 -m pip install --no-cache-dir -e .
+
+# Reassert the torch/torchvision/torchcodec versions above: pyproject.toml
+# pins torch==2.10.0 as a base dependency, so if TORCH_VERSION was
+# overridden, the ".[act]" install just silently pulled torch==2.10.0 back
+# in (from plain PyPI, no less) to satisfy that pin. --no-deps is safe here
+# because download.pytorch.org wheels bundle their own CUDA runtime libs
+# rather than depending on separate nvidia-*-cu12 packages. No-op (fast) when
+# TORCH_VERSION matches pyproject.toml's pin, as in the default build.
+RUN python3 -m pip install --no-cache-dir --no-deps --index-url ${TORCH_INDEX_URL} \
+         torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchcodec==${TORCHCODEC_VERSION}
 
 CMD ["/bin/bash"]

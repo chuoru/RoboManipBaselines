@@ -14,12 +14,21 @@
 #      image like the Windows build's host.docker.internal:0.0), and the
 #      host's X11 socket is bind-mounted below.
 #
-# GPU note: this pulls torch==2.10.0 from the cu128 wheel index (same as the
-# Windows build, see Dockerfile). If the host driver is older than the
-# cu128/cu126 minimum (roughly >=570 / >=560), `torch.cuda.is_available()`
-# may still work via CUDA minor-version compatibility, or may fail with a
-# "CUDA driver version is insufficient" error -- if so, update the host
-# NVIDIA driver rather than editing this file.
+# GPU note: build.args below pins torch==2.5.1/torchvision==0.20.1/
+# torchcodec==0.1.1 from the cu121 wheel index, instead of the Windows
+# build's default torch==2.10.0/cu128. This is for hosts (like this one)
+# whose driver is too old for CUDA 12.6+: CUDA's forward-compatibility
+# package -- which is what would otherwise let a newer CUDA build run on an
+# older driver -- only supports data-center GPUs, so on a consumer/
+# workstation card (e.g. TITAN RTX) a cu128 build fails outright with
+# "CUDA driver version is insufficient" / "forward compatibility was
+# attempted on non supported HW", not just a slower fallback path. cu121 is
+# the newest index that still natively matches driver branches around
+# 530-535. This intentionally diverges from pyproject.toml's torch==2.10.0
+# pin -- see the matching comment in Dockerfile for how that's kept from
+# being silently overwritten by the ".[act]" install step. If you later
+# update this host's NVIDIA driver to >=560 (cu126) or >=570 (cu128), drop
+# the build.args override below to go back to the Windows build's versions.
 #
 # USB devices (SpaceMouse, GELLO, Femto Bolt/RealSense cameras, real robot
 # controllers) can be bound directly on native Linux -- no WSL-style
@@ -32,6 +41,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+        TORCH_VERSION: 2.5.1
+        TORCHVISION_VERSION: 0.20.1
+        TORCHCODEC_VERSION: 0.1.1
     image: robo_manip_baselines:latest
     container_name: robo_manip_baselines
     stdin_open: true
