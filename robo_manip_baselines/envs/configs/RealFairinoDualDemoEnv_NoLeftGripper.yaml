@@ -1,0 +1,15 @@
+robot_ip_left: "192.168.57.2"
+robot_ip_right: "192.168.57.3"
+pointcloud_camera_ids:
+  head: "CP2AB53000CC"
+  wrist_left: "CV2L3600004F"
+  wrist_right: "CV2L3600005M"
+gripper_hand_type_left: "left"
+gripper_hand_type_right: "right"
+# Left gripper's Modbus connection is currently broken (cable/USB adapter issue,
+# unresponsive on both hand_id addresses) -- set to null so the left ARM still
+# moves for real while its gripper stays uncommanded, instead of skipping
+# everything via dry_run. Revert to RealFairinoDualDemoEnv.yaml once the left
+# gripper hardware is fixed.
+gripper_modbus_port_left: null
+gripper_modbus_port_right: "/dev/ttyUSB1"
