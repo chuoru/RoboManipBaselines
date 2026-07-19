@@ -1,4 +1,15 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+# The base image bakes in NVIDIA_REQUIRE_CUDA=cuda>=<this version>, which the
+# container runtime enforces at startup regardless of what CUDA version the
+# Python packages below actually use. If the host driver doesn't natively
+# meet it, the runtime falls back to CUDA forward compatibility -- which
+# only supports data-center GPUs, so on a consumer/workstation card (e.g.
+# TITAN RTX) it fails outright with "forward compatibility was attempted on
+# non supported HW", even if the installed torch build itself would have
+# run fine natively. Override to match the host driver's real ceiling, e.g.
+# nvidia/cuda:12.2.2-devel-ubuntu22.04 for a driver capped at CUDA 12.2 (see
+# the matching TORCH_VERSION override below -- both need to move together).
+ARG CUDA_BASE_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM ${CUDA_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
