@@ -23,6 +23,30 @@ from ..RealEnvBase import RealEnvBase
 _ARM_LOW_DEG = [-175, -265, -150, -265, -175, -175]
 _ARM_HIGH_DEG = [175, 85, 150, 85, 175, 175]
 
+# Tighter, per-arm joint ranges (deg) measured empirically to keep each arm from
+# swinging into the mounting frame -- narrower than _ARM_LOW_DEG/_ARM_HIGH_DEG
+# above, and not symmetric between arms since the frame geometry around each
+# side differs. Given as raw (a, b) pairs (order not guaranteed low-to-high);
+# min/max is taken when building the actual clamp bounds.
+_FRAME_SAFE_JOINT_RANGE_DEG = {
+    "left": [
+        (105, -44),
+        (-6, -101),
+        (137, 11),
+        (-250, -107),
+        (-44, -138),
+        (-98, 91),
+    ],
+    "right": [
+        (-175, -43),
+        (-90, -160),
+        (-47, -146),
+        (75, -45),
+        (157, 30),
+        (120, -95),
+    ],
+}
+
 # This arm has no external axes, so ServoJ's axis position is always zero
 # (see the ServoJ usage in fairino-python-sdk's example/servo.py)
 EXAXIS_POS = [0.0, 0.0, 0.0, 0.0]
@@ -118,6 +142,19 @@ class RealFairinoDualEnvBase(RealEnvBase):
         self.command_smoothing_alpha = command_smoothing_alpha
         # TODO: Verify against the official FR3 max joint speed before running on real hardware.
         self.joint_vel_limit = np.deg2rad(90)  # [rad/s]
+
+        # Precompute the frame-safe joint clamp bounds (rad) per side -- see
+        # _FRAME_SAFE_JOINT_RANGE_DEG and overwrite_command_for_safety().
+        self._frame_safe_joint_low_rad = [None, None]
+        self._frame_safe_joint_high_rad = [None, None]
+        for side, side_name in ((0, "left"), (1, "right")):
+            range_deg = np.array(_FRAME_SAFE_JOINT_RANGE_DEG[side_name])
+            self._frame_safe_joint_low_rad[side] = np.deg2rad(
+                range_deg.min(axis=1)
+            )
+            self._frame_safe_joint_high_rad[side] = np.deg2rad(
+                range_deg.max(axis=1)
+            )
 
         # Per-arm state, indexed [0]=left, [1]=right, mirroring the layout used by
         # action/observation (arm1(0:6), gripper1(6), arm2(7:13), gripper2(13)).
@@ -531,6 +568,24 @@ class RealFairinoDualEnvBase(RealEnvBase):
         model, data = self._dry_run_pin_models[side]
         pin.forwardKinematics(model, data, arm_joint_pos_rad)
         return data.oMi[self.body_config_list[side].ik_eef_joint_id].translation
+
+    def overwrite_command_for_safety(self, action, duration, joint_vel_limit_scale):
+        # Clamp to the frame-safe range before the base class's action_space
+        # clamp/velocity-limit/NaN checks, so the tighter per-arm bound (meant
+        # to keep the arm from swinging into the mounting frame) is what
+        # everything downstream -- including the velocity clamp -- reasons
+        # about, rather than being applied as an afterthought that could
+        # reintroduce a jump.
+        for side in (0, 1):
+            arm_joint_idxes = self.body_config_list[side].arm_joint_idxes
+            action[arm_joint_idxes] = np.clip(
+                action[arm_joint_idxes],
+                self._frame_safe_joint_low_rad[side],
+                self._frame_safe_joint_high_rad[side],
+            )
+        return super().overwrite_command_for_safety(
+            action, duration, joint_vel_limit_scale
+        )
 
     def _set_action(self, action, duration=None, joint_vel_limit_scale=0.5, wait=False):
         start_time = time.time()
