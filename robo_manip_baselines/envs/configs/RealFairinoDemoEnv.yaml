@@ -8,9 +8,8 @@ robot_ip: "192.168.57.2"
 # doesn't matter. Find each camera's serial number by running:
 #   python ./third_party/pyorbbecsdk/examples/enumerate.py
 pointcloud_camera_ids:
-  head: "CHANGE_ME_HEAD_SERIAL"
-  wrist_left: "CHANGE_ME_WRIST_LEFT_SERIAL"
-  wrist_right: "CHANGE_ME_WRIST_RIGHT_SERIAL"
+  head: "CP2AB53000CC"
+  wrist_left: "CV2L3600004F"
 # gelsight_ids:
 #   tactile_left: "GelSight Mini R0B 2BNK-CE0U: Ge"
 #   tactile_right: "GelSight Mini R0B 2BG8-0H3X: Ge"
