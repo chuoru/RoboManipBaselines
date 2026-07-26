@@ -22,7 +22,7 @@
   device_params:
     name: left
     serial_number: LHR-904A2704
-  pos_scale: 0.9
+  pos_scale: 1.2
   vive_to_eef_frame_rotation:
     - [-0.017408, -0.038467, -0.999108]
     - [-0.998416, 0.054132, 0.015312]
@@ -36,7 +36,7 @@
   device_params:
     name: right
     serial_number: LHR-208C8961
-  pos_scale: 0.9
+  pos_scale: 1.2
   vive_to_eef_frame_rotation:
     - [-0.040963, 0.055221, 0.997634]
     - [0.998547, -0.032731, 0.042812]

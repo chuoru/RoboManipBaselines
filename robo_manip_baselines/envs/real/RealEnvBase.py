@@ -76,56 +76,91 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         ctx = Context()
         device_list = ctx.query_devices()
         curr_device_cnt = device_list.get_count()
-        for (
-            pointcloud_camera_name,
-            pointcloud_camera_id,
-        ) in pointcloud_camera_ids.items():
-            # A string ID is matched against the device's serial number (stable across
-            # reboots/replugs, e.g. for multi-camera rigs); an int ID is matched by
-            # enumeration index (order is not guaranteed to be stable).
-            if isinstance(pointcloud_camera_id, str):
-                try:
-                    device = device_list.get_device_by_serial_number(
-                        pointcloud_camera_id
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, serial: {pointcloud_camera_id}) not detected: {e}"
-                    )
-            else:
-                if pointcloud_camera_id > curr_device_cnt:
-                    raise RuntimeError(
-                        f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, ID: {pointcloud_camera_id}) not detected. Max camera ID: {curr_device_cnt}"
-                    )
-                device = device_list.get_device_by_index(pointcloud_camera_id)
+        try:
+            for (
+                pointcloud_camera_name,
+                pointcloud_camera_id,
+            ) in pointcloud_camera_ids.items():
+                # A string ID is matched against the device's serial number (stable
+                # across reboots/replugs, e.g. for multi-camera rigs); an int ID is
+                # matched by enumeration index (order is not guaranteed to be stable).
+                if isinstance(pointcloud_camera_id, str):
+                    try:
+                        device = device_list.get_device_by_serial_number(
+                            pointcloud_camera_id
+                        )
+                    except Exception as e:
+                        # get_device_by_serial_number() can fail even though the
+                        # camera is fully enumerated and openable -- observed when
+                        # its USB string-descriptor read is momentarily flaky (a
+                        # cable/connector issue), which get_device_by_index()
+                        # doesn't seem to depend on. Fall back to matching the
+                        # serial against the by-index listing before giving up.
+                        device = None
+                        for device_idx in range(curr_device_cnt):
+                            if (
+                                device_list.get_device_serial_number_by_index(
+                                    device_idx
+                                )
+                                == pointcloud_camera_id
+                            ):
+                                device = device_list.get_device_by_index(device_idx)
+                                break
+                        if device is None:
+                            raise RuntimeError(
+                                f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, serial: {pointcloud_camera_id}) not detected: {e}"
+                            )
+                else:
+                    if pointcloud_camera_id > curr_device_cnt:
+                        raise RuntimeError(
+                            f"[{self.__class__.__name__}] Specified camera (name: {pointcloud_camera_name}, ID: {pointcloud_camera_id}) not detected. Max camera ID: {curr_device_cnt}"
+                        )
+                    device = device_list.get_device_by_index(pointcloud_camera_id)
 
-            self.pointcloud_cameras[pointcloud_camera_name] = {
-                "queue": Queue(),
-                "device": device,
-                # Tracks consecutive frame timeouts, to trigger a pipeline restart
-                # after repeated misses (see get_pointcloud_camera_data).
-                "consecutive_failures": 0,
-                # Last successfully processed frame, reused as a frozen fallback
-                # image while a flaky camera is being reconnected, so a dropped
-                # camera doesn't crash or stall the teleop loop.
-                "last_result": None,
-                # True while a background reconnect attempt is in flight, to avoid
-                # piling up multiple concurrent reconnect threads for one camera.
-                "reconnecting": False,
-            }
-            self._start_femtobolt_pipeline(pointcloud_camera_name)
+                self.pointcloud_cameras[pointcloud_camera_name] = {
+                    "queue": Queue(),
+                    "device": device,
+                    # Tracks consecutive frame timeouts, to trigger a pipeline restart
+                    # after repeated misses (see get_pointcloud_camera_data).
+                    "consecutive_failures": 0,
+                    # Last successfully processed frame, reused as a frozen fallback
+                    # image while a flaky camera is being reconnected, so a dropped
+                    # camera doesn't crash or stall the teleop loop.
+                    "last_result": None,
+                    # True while a background reconnect attempt is in flight, to avoid
+                    # piling up multiple concurrent reconnect threads for one camera.
+                    "reconnecting": False,
+                }
+                self._start_femtobolt_pipeline(pointcloud_camera_name)
+        except Exception:
+            # If one camera (of possibly several) fails partway through, any
+            # pipelines already started above must be stopped before re-raising --
+            # otherwise they're left open with nothing tracking them (this __init__
+            # call never completes, so there's no env to close() later), and the
+            # next run's uvc_open on those devices fails until they're USB-reset.
+            for pointcloud_camera in self.pointcloud_cameras.values():
+                pipeline = pointcloud_camera.get("pipeline")
+                if pipeline is not None:
+                    try:
+                        pipeline.stop()
+                    except Exception as stop_error:
+                        print(
+                            f"[{self.__class__.__name__}] Error stopping pointcloud "
+                            f"camera pipeline during cleanup: {stop_error}"
+                        )
+            raise
 
     def _start_femtobolt_pipeline(self, pointcloud_camera_name):
         """(Re)start the pyorbbecsdk pipeline for one Orbbec camera. Used both for
         the initial connection and to recover a camera whose frame callback has
         stopped firing (flaky USB link).
 
-        Only the color stream is enabled: depth streaming (and the resulting
-        point-cloud computation) roughly doubles the USB bandwidth/CPU load per
-        camera, which was implicated in cameras dropping out on this rig when
-        running 3 of them at once. Nothing in the teleop/data pipeline actually
-        needs depth here -- TeleopBase.draw_pointcloud() only reads from
-        self.cameras (RealSense), never from pointcloud_cameras."""
+        Both color and depth streams are enabled. Note: depth streaming roughly
+        doubles the USB bandwidth/CPU load per camera, which was previously
+        implicated in cameras dropping out on this rig when running 3 of them at
+        once -- if that instability comes back, disabling the depth
+        enable_stream() call below (and reverting get_pointcloud_camera_data()'s
+        depth extraction to the zero placeholder) is the known-stable fallback."""
         from pyorbbecsdk import Config, OBSensorType, Pipeline
 
         pointcloud_camera = self.pointcloud_cameras[pointcloud_camera_name]
@@ -141,6 +176,16 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             )
         color_profile = color_profile_list.get_default_video_stream_profile()
         config.enable_stream(color_profile)
+
+        depth_profile_list = pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
+        if depth_profile_list is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Camera '{pointcloud_camera_name}' has no "
+                "depth sensor."
+            )
+        depth_profile = depth_profile_list.get_default_video_stream_profile()
+        config.enable_stream(depth_profile)
+
         pipeline.start(
             config,
             lambda frame_set,
@@ -318,6 +363,16 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 for body_config in self.body_config_list
                 if isinstance(body_config, ArmConfig)
             ]
+        )
+        # Clip to the physical joint range before anything else, so an IK
+        # solution that overshoots a joint limit (e.g. while chasing a
+        # teleop target near the edge of the workspace) can't reach the robot
+        # and fault/E-stop it -- the velocity clamp below only limits how fast
+        # a joint moves, not where it's allowed to end up.
+        action[arm_joint_idxes] = np.clip(
+            action[arm_joint_idxes],
+            self.action_space.low[arm_joint_idxes],
+            self.action_space.high[arm_joint_idxes],
         )
         arm_joint_pos_command = action[arm_joint_idxes]
         scaled_joint_vel_limit = (
@@ -521,13 +576,26 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
         rgb_image = cv2.resize(rgb_image, (640, 480))
 
-        # Only the color stream is enabled (see _start_femtobolt_pipeline) to cut USB
-        # bandwidth, so there is no real depth data. TeleopBase.draw_image() still
-        # expects a "depth_images" entry for every camera not in rgb_tactile_names,
-        # so supply a cheap all-zero placeholder rather than touching that shared
-        # code. Nothing consumes "pointclouds" for these cameras (draw_pointcloud()
-        # only reads from self.cameras / RealSense), so it's simply omitted now.
-        depth_image = np.zeros(rgb_image.shape[:2], dtype=np.float32)
+        # The depth stream is enabled in _start_femtobolt_pipeline(). Convert the
+        # raw Y16 depth (device-native units, typically mm) to meters, matching
+        # the convention used for RealSense depth elsewhere in this file (see
+        # get_realsense_data()). Falls back to an all-zero placeholder if this
+        # tick's frame set has no depth sub-frame, so a momentary miss doesn't
+        # break TeleopBase.draw_image(), which expects a "depth_images" entry for
+        # every camera not in rgb_tactile_names.
+        depth_frame = frames.get_depth_frame()
+        if depth_frame is None:
+            depth_image = np.zeros(rgb_image.shape[:2], dtype=np.float32)
+        else:
+            depth_width = depth_frame.get_width()
+            depth_height = depth_frame.get_height()
+            depth_scale = depth_frame.get_depth_scale()
+            depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16)
+            depth_data = depth_data.reshape((depth_height, depth_width))
+            depth_image = 1e-3 * depth_scale * depth_data.astype(np.float32)  # [m]
+            depth_image = cv2.resize(
+                depth_image, (640, 480), interpolation=cv2.INTER_NEAREST
+            )
 
         result = {
             "rgb_images": rgb_image,
