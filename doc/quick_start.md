@@ -69,7 +69,7 @@ When using keyboard teleoperation, the following keys control the robot end-effe
 ### Test command transmission (dry-run mode)
 Before running on the real robot, you can test the entire teleoperation pipeline without connecting to hardware. This validates keyboard input → inverse kinematics → command generation:
 ```console
-$ python ./bin/Teleop.py RealFairinoDemo --config ./envs/configs/RealFairinoDemoEnv_DryRun.yaml --world_idx_list 0 5 --input_device keyboard
+$ python ./bin/Teleop.py RealFairino3Demo --config ./envs/configs/RealFairino3DemoEnv_DryRun.yaml --world_idx_list 0 5 --input_device keyboard
 ```
 In dry-run mode, ServoJ commands will be printed to the console instead of transmitted to the robot. This allows you to:
 - Verify the keyboard input device works
@@ -87,15 +87,27 @@ In dry-run mode, ServoJ commands will be printed to the console instead of trans
 > After installation, the LinkerHand module is automatically available for hardware control.
 
 ### Run on the real Fairino FR3 arm
-To teleoperate the real Fairino FR3 arm instead, edit `robot_ip` (and, if available, `camera_ids` / `gelsight_ids`) in [RealFairinoDemoEnv.yaml](../robo_manip_baselines/envs/configs/RealFairinoDemoEnv.yaml), then run:
+To teleoperate the real Fairino FR3 arm instead, edit `robot_ip` (and, if available, `camera_ids` / `gelsight_ids`) in [RealFairino3DemoEnv.yaml](../robo_manip_baselines/envs/configs/RealFairino3DemoEnv.yaml), then run:
 ```console
-$ python ./bin/Teleop.py RealFairinoDemo --config ./envs/configs/RealFairinoDemoEnv.yaml --world_idx_list 0 5 --input_device keyboard
+$ python ./bin/Teleop.py RealFairino3Demo --config ./envs/configs/RealFairino3DemoEnv.yaml --world_idx_list 0 5 --input_device keyboard
 $ # A Vive tracker can be used instead of a keyboard (requires --input_device_config, e.g. ./teleop/configs/Vive.yaml)
-$ python ./bin/Teleop.py RealFairinoDemo --config ./envs/configs/RealFairinoDemoEnv.yaml --world_idx_list 0 5 --input_device vive --input_device_config ./teleop/configs/Vive.yaml
+$ python ./bin/Teleop.py RealFairino3Demo --config ./envs/configs/RealFairino3DemoEnv.yaml --world_idx_list 0 5 --input_device vive --input_device_config ./teleop/configs/Vive.yaml
 ```
 
 > [!TIP]
 > A teleoperation input device such as a 3D mouse can be used instead of a keyboard. See [here](../robo_manip_baselines/teleop/README.md).
+
+### Run on the real Fairino FR5 arm
+The FR5 arm shares the same joint ranges and control interface as FR3, just a different kinematic chain. Test command transmission first:
+```console
+$ python ./bin/Teleop.py RealFairino5Demo --config ./envs/configs/RealFairino5DemoEnv_DryRun.yaml --world_idx_list 0 5 --input_device keyboard
+```
+To teleoperate the real Fairino FR5 arm, edit `robot_ip` (and, if available, `camera_ids` / `gelsight_ids`) in [RealFairino5DemoEnv.yaml](../robo_manip_baselines/envs/configs/RealFairino5DemoEnv.yaml), then run:
+```console
+$ python ./bin/Teleop.py RealFairino5Demo --config ./envs/configs/RealFairino5DemoEnv.yaml --world_idx_list 0 5 --input_device keyboard
+$ # A Vive tracker can be used instead of a keyboard (requires --input_device_config, e.g. ./teleop/configs/Vive.yaml)
+$ python ./bin/Teleop.py RealFairino5Demo --config ./envs/configs/RealFairino5DemoEnv.yaml --world_idx_list 0 5 --input_device vive --input_device_config ./teleop/configs/Vive.yaml
+```
 
 ### Run on the dual-arm Fairino FR3 setup
 For the two-arm rig (two FR3 arms, two LinkerHand grippers, one head camera, two wrist cameras), edit `robot_ip_left` / `robot_ip_right` / `gripper_modbus_port_left` / `gripper_modbus_port_right` and the Orbbec camera serial numbers in [RealFairinoDualDemoEnv.yaml](../robo_manip_baselines/envs/configs/RealFairinoDualDemoEnv.yaml), then run:

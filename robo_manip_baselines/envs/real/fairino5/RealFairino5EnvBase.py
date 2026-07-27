@@ -17,9 +17,9 @@ from robo_manip_baselines.teleop import (
 from ..RealEnvBase import RealEnvBase
 
 
-class RealFairinoEnvBase(RealEnvBase):
-    # Official FR3 joint ranges: J1/J5/J6 are +-175 deg; J2/J4 are +85 to -265 deg;
-    # J3 is +-150 deg.
+class RealFairino5EnvBase(RealEnvBase):
+    # Official Fairino joint ranges (shared by FR3/FR5): J1/J5/J6 are +-175 deg;
+    # J2/J4 are +85 to -265 deg; J3 is +-150 deg.
     action_space = Box(
         low=np.array(
             [
@@ -94,13 +94,13 @@ class RealFairinoEnvBase(RealEnvBase):
         # call rate. Lower alpha = smoother but more lag; 1.0 = no filtering.
         self.command_smoothing_alpha = command_smoothing_alpha
         self._filtered_arm_joint_pos_command = None
-        # TODO: Verify against the official FR3 max joint speed before running on real hardware.
+        # TODO: Verify against the official FR5 max joint speed before running on real hardware.
         self.joint_vel_limit = np.deg2rad(90) # [rad/s]
         self.body_config_list = [
             ArmConfig(
                 arm_urdf_path=path.join(
                     path.dirname(__file__),
-                    "../../assets/common/robots/fairino3_v6/fairino3_v6.urdf",
+                    "../../assets/common/robots/fairino5_v6/fairino5_v6.urdf",
                 ),
                 arm_root_pose=None,
                 ik_eef_joint_id=6,
@@ -304,7 +304,7 @@ class RealFairinoEnvBase(RealEnvBase):
         # pose is NOT performed here: this only re-syncs internal state so the safety
         # clamp in overwrite_command_for_safety compares against where the arm truly
         # is. The actual move happens in move_to_init_pose(), which
-        # OperationRealFairinoDemo's MoveToInitPhase calls as the last pre-motion
+        # OperationRealFairino5Demo's MoveToInitPhase calls as the last pre-motion
         # phase, right before StandbyTeleopPhase begins.
         self._motion_enabled = False
         self._filtered_arm_joint_pos_command = None
@@ -322,7 +322,7 @@ class RealFairinoEnvBase(RealEnvBase):
         """Physically move the arm/gripper to the reset pose and enable streaming
         ServoJ commands from the teleop loop. Intended to be called once, right
         before standby teleop begins (see MoveToInitPhase in
-        OperationRealFairinoDemo.py)."""
+        OperationRealFairino5Demo.py)."""
         print(
             f"[{self.__class__.__name__}] Start moving the robot to the reset position."
         )

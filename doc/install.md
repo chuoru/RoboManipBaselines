@@ -250,7 +250,7 @@ $ cd third_party/gello_software
 $ pip install -e .
 ```
 
-### [Real Fairino environments](../robo_manip_baselines/envs/real/fairino)
+### [Real Fairino environments](../robo_manip_baselines/envs/real/fairino3)
 Install dependent libraries including [gello_software](https://github.com/wuphilipp/gello_software):
 ```console
 # Go to the top directory of this repository

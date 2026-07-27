@@ -1,14 +1,14 @@
 import numpy as np
 
-from .RealFairinoEnvBase import RealFairinoEnvBase
+from .RealFairino3EnvBase import RealFairino3EnvBase
 
 
-class RealFairinoDemoEnv(RealFairinoEnvBase):
+class RealFairino3DemoEnv(RealFairino3EnvBase):
     def __init__(
         self,
         **kwargs,
     ):
-        RealFairinoEnvBase.__init__(
+        RealFairino3EnvBase.__init__(
             self,
             # TODO: This is a placeholder ready pose for the FR3 arm. Verify it against
             # the official specification before running on real hardware.

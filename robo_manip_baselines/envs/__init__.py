@@ -156,10 +156,16 @@ register(
     entry_point="robo_manip_baselines.envs.real.xarm7_dual:RealXarm7DualDemoEnv",
 )
 
-## Fairino
+## Fairino3
 register(
-    id="robo_manip_baselines/RealFairinoDemoEnv-v0",
-    entry_point="robo_manip_baselines.envs.real.fairino:RealFairinoDemoEnv",
+    id="robo_manip_baselines/RealFairino3DemoEnv-v0",
+    entry_point="robo_manip_baselines.envs.real.fairino3:RealFairino3DemoEnv",
+)
+
+## Fairino5
+register(
+    id="robo_manip_baselines/RealFairino5DemoEnv-v0",
+    entry_point="robo_manip_baselines.envs.real.fairino5:RealFairino5DemoEnv",
 )
 
 ## Fairino-Dual

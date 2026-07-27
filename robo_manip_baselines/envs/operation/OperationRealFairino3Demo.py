@@ -25,7 +25,7 @@ class GraspPhase(GraspPhaseBase):
         self.duration = 0.5  # [s]
 
 
-class OperationRealFairinoDemo:
+class OperationRealFairino3Demo:
     def __init__(
         self,
         robot_ip,
@@ -47,7 +47,7 @@ class OperationRealFairinoDemo:
 
     def setup_env(self, render_mode="human"):
         self.env = gym.make(
-            "robo_manip_baselines/RealFairinoDemoEnv-v0",
+            "robo_manip_baselines/RealFairino3DemoEnv-v0",
             robot_ip=self.robot_ip,
             camera_ids=self.camera_ids,
             gelsight_ids=self.gelsight_ids,

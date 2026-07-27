@@ -12,7 +12,7 @@ class RealFairinoDualDemoEnv(RealFairinoDualEnvBase):
             self,
             # Left arm index: 0:6 (+gripper at 6), right arm index: 7:13 (+gripper at
             # 13). This follows the same layout convention as the other Dual envs.
-            # TODO: This reuses the single-arm RealFairinoDemoEnv reset pose for both
+            # TODO: This reuses the single-arm RealFairino3DemoEnv reset pose for both
             # arms as a placeholder; verify/replace with poses appropriate for the
             # dual-arm mount before running on real hardware.
             init_qpos=np.concatenate(
