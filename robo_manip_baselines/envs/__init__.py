@@ -173,3 +173,9 @@ register(
     id="robo_manip_baselines/RealFairinoDualDemoEnv-v0",
     entry_point="robo_manip_baselines.envs.real.fairino_dual:RealFairinoDualDemoEnv",
 )
+
+## UMI (Universal Manipulation Interface)-style, robot-less rig tracked by an HTC Vive Tracker
+register(
+    id="robo_manip_baselines/RealUMIDemoEnv-v0",
+    entry_point="robo_manip_baselines.envs.real.umi:RealUMIDemoEnv",
+)

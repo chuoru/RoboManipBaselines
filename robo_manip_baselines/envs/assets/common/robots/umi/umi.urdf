@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal virtual URDF for a UMI (Universal Manipulation Interface)-style
+  handheld demonstration-collection rig (see RealUMIEnvBase.py).
+
+  This "robot" has no motors and no real kinematic chain: the only joint is a
+  single 6-DoF floating joint whose pose is written directly from an external
+  pose source (the HTC Vive Tracker, via ViveInputDevice) instead of being
+  solved by inverse kinematics against real robot geometry. It exists purely
+  so that ArmManager/ArmConfig (which every other env in this repo already
+  uses, and which DataKey/MotionManager's EEF-pose bookkeeping is hard-coded
+  against via isinstance(ArmManager)/isinstance(ArmConfig) checks) can be
+  reused unmodified for a handheld, robot-less UMI gripper.
+
+  "floating" is a standard URDF joint type (alongside revolute/prismatic/
+  fixed/continuous/planar); Pinocchio's URDF parser builds it as a
+  JointModelFreeFlyer, whose configuration is (x, y, z, qx, qy, qz, qw) and
+  tangent space is 6D (vx, vy, vz, wx, wy, wz) -- both are handled generically
+  by the same pin.integrate/pin.log/computeJointJacobian calls ArmManager
+  already uses for revolute-jointed arms, so no changes to ArmManager itself
+  should be required. This has not been verified against a real Pinocchio
+  install (unavailable in this environment) -- smoke-test with:
+    python -c "import pinocchio as pin; m = pin.buildModelFromUrdf('umi.urdf'); print(m.nq, m.nv, m.names.tolist())"
+  before trusting it against real hardware.
+-->
+<robot name="umi_robot">
+  <link name="world_link"/>
+
+  <link name="eef_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="eef_floating_joint" type="floating">
+    <parent link="world_link"/>
+    <child link="eef_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+</robot>

@@ -1,0 +1,21 @@
+# Config for RealUMIDemoEnv (a UMI-style handheld demo-collection rig).
+#
+# Camera mounted on the handheld rig itself (not on a robot). Uncomment and
+# fill in with the camera's device ID as detected by pyrealsense2.
+# camera_ids:
+#   hand: "000000000000"
+#
+# If using an Orbbec/Femto camera instead of RealSense, use
+# pointcloud_camera_ids (see setup_femtobolt in envs/real/RealEnvBase.py),
+# keyed by the camera's serial number so device order doesn't matter. Find
+# each camera's serial number by running:
+#   python ./third_party/pyorbbecsdk/examples/enumerate.py
+# pointcloud_camera_ids:
+#   hand: "CP2AB53000CC"
+
+# Note: unlike the robot envs, there is no robot_ip/gripper_modbus_port here
+# -- this rig has no attached robot arm or motorized gripper. Vive Tracker
+# calibration (serial number, vive_to_eef_frame_rotation,
+# vive_world_to_base_frame_rotation) is passed separately via
+# `--input_device vive --input_device_config teleop/configs/Vive.yaml`, the
+# same as for the teleoperated-robot envs -- see teleop/README.md.
