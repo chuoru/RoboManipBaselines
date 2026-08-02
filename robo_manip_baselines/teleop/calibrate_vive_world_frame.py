@@ -52,15 +52,38 @@ def wait_for_tracker(pysurvive, ctx, serial_number, wait_sec):
     )
 
 
-def capture_position(tracker_object, label):
+def capture_position(tracker_object, label, sample_sec=0.5, sample_hz=50.0):
+    """Average many samples over sample_sec while the tracker is held still,
+    instead of trusting a single instantaneous Pose() reading right when Enter
+    is pressed -- a single sample is vulnerable to whatever hand jitter
+    happens to be present at that exact instant (e.g. from the act of pressing
+    Enter itself), which directly becomes calibration error (a few degrees of
+    single-sample noise here was traced to ~15-30 deg of downstream joint
+    error on the real FR5 -- see misc/CheckUmiFairino5Reachability.py-era
+    discussion)."""
     input(f"[calibrate] {label} Press Enter when ready and holding steady.")
-    pose, timecode = tracker_object.Pose()
-    if timecode <= 0:
+    print(f"[calibrate]   Sampling for {sample_sec}s -- keep holding still...")
+    positions = []
+    start = time.time()
+    while time.time() - start < sample_sec:
+        pose, timecode = tracker_object.Pose()
+        if timecode > 0:
+            positions.append(np.array(pose.Pos[:3], dtype=np.float64))
+        time.sleep(1.0 / sample_hz)
+    if len(positions) == 0:
         raise RuntimeError(
             "[calibrate] Tracker has no valid pose yet -- make sure it's visible "
             "to both lighthouses and retry."
         )
-    return np.array(pose.Pos[:3], dtype=np.float64)
+    positions = np.stack(positions, axis=0)
+    jitter = np.linalg.norm(positions.std(axis=0))
+    if jitter > 0.01:
+        print(
+            f"[calibrate]   WARNING: {jitter * 100:.1f} cm of jitter across "
+            f"{len(positions)} samples -- hold the tracker more still and "
+            "consider retrying this step."
+        )
+    return positions.mean(axis=0)
 
 
 def fit_rotation(measured_room, desired_base):
@@ -125,8 +148,25 @@ def main():
     except KeyboardInterrupt:
         print("\n[calibrate] Interrupted by Ctrl+C.")
         return
-    finally:
-        pysurvive.simple_close(ctx.ptr)
+
+    # Compute and print the result BEFORE calling pysurvive.simple_close()
+    # below: that native call has been observed to hang indefinitely (with
+    # even Ctrl+C unable to interrupt it, since SIGINT can't be delivered to
+    # blocked native code) on this rig, which would otherwise lose the motion
+    # data captured above -- forcing a full recalibration -- even though
+    # everything needed to compute the result is already in hand.
+    # Diagnose non-orthogonality BEFORE fitting: fit_rotation's SVD forces a
+    # best orthogonal rotation regardless of how orthogonal the 3 measured
+    # directions actually were, so a large per-axis error in the final report
+    # doesn't say which pair of motions was actually the problem (e.g. Y and Z
+    # jogged along near-overlapping directions) -- this does.
+    print("[calibrate] Pairwise angles between measured directions (should be ~90 deg):")
+    axis_pairs = (("X", "Y", 0, 1), ("X", "Z", 0, 2), ("Y", "Z", 1, 2))
+    for label_a, label_b, i, j in axis_pairs:
+        cos_angle = np.clip(np.dot(local_deltas[i], local_deltas[j]), -1.0, 1.0)
+        angle_deg = np.rad2deg(np.arccos(cos_angle))
+        flag = " <-- NOT ORTHOGONAL" if abs(angle_deg - 90.0) > 10.0 else ""
+        print(f"    {label_a}-{label_b}: {angle_deg:.2f} deg{flag}")
 
     measured_room = np.stack(local_deltas, axis=1)  # (3, 3): columns = X, Y, Z tests
     desired_base = np.eye(3)  # by construction, the 3 tests ARE base +X, +Y, +Z
@@ -149,6 +189,14 @@ def main():
     print("    vive_world_to_base_frame_rotation:")
     for row in rotation:
         print(f"      - [{row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}]")
+
+    print(
+        "\n[calibrate] Closing libsurvive context (this has been observed to "
+        "hang on this rig -- if nothing happens within a few seconds, the "
+        "result above is already valid; kill this process from another "
+        "terminal, e.g. `pkill -f calibrate_vive_world_frame`)."
+    )
+    pysurvive.simple_close(ctx.ptr)
 
 
 if __name__ == "__main__":

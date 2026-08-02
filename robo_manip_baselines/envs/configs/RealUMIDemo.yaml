@@ -10,8 +10,8 @@
 # keyed by the camera's serial number so device order doesn't matter. Find
 # each camera's serial number by running:
 #   python ./third_party/pyorbbecsdk/examples/enumerate.py
-# pointcloud_camera_ids:
-#   hand: "CP2AB53000CC"
+pointcloud_camera_ids:
+   hand: "CV2L3600004F"
 
 # Note: unlike the robot envs, there is no robot_ip/gripper_modbus_port here
 # -- this rig has no attached robot arm or motorized gripper. Vive Tracker

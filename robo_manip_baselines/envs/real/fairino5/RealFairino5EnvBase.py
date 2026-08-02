@@ -23,24 +23,24 @@ class RealFairino5EnvBase(RealEnvBase):
     action_space = Box(
         low=np.array(
             [
-                np.deg2rad(-175),
-                np.deg2rad(-265),
-                np.deg2rad(-150),
-                np.deg2rad(-265),
-                np.deg2rad(-175),
-                np.deg2rad(-175),
+                np.deg2rad(-133),
+                np.deg2rad(-136),
+                np.deg2rad(-160),
+                np.deg2rad(-130),
+                np.deg2rad(-90),
+                np.deg2rad(-101),
                 0.0,
             ],
             dtype=np.float32,
         ),
         high=np.array(
             [
-                np.deg2rad(175),
-                np.deg2rad(85),
-                np.deg2rad(150),
-                np.deg2rad(85),
-                np.deg2rad(175),
-                np.deg2rad(175),
+                np.deg2rad(0),
+                np.deg2rad(0),
+                np.deg2rad(-75),
+                np.deg2rad(84),
+                np.deg2rad(130),
+                np.deg2rad(100),
                 100.0,
             ],
             dtype=np.float32,
@@ -71,6 +71,17 @@ class RealFairino5EnvBase(RealEnvBase):
         init_qpos,
         gripper_hand_type="right",
         gripper_modbus_port="/dev/ttyUSB0",
+        # "linker_hand": LinkerHand RS485 gripper with continuous 0-100% width
+        # control (see _gripper_pose). "tool_do": a simple binary gripper
+        # wired to the Fairino's own tool digital output (SetToolDO/GetToolDO),
+        # toggled open/closed via gripper_do_id -- no continuous width. Default
+        # is "tool_do" since the currently-mounted gripper is the IAI one.
+        gripper_type="tool_do",
+        gripper_do_id=1,
+        # DO status (0 or 1) that closes the gripper; the other value opens it.
+        # Confirmed on real hardware via misc/TestGripperToolDO.py: DO1=1 opens,
+        # DO1=0 closes (DO0 is not wired to this gripper at all).
+        gripper_do_close_status=0,
         dry_run=False,
         command_smoothing_alpha=0.3,
         pointcloud_camera_ids=None,
@@ -81,6 +92,10 @@ class RealFairino5EnvBase(RealEnvBase):
         # Setup robot
         self.init_qpos = init_qpos
         self.dry_run = dry_run
+        self.gripper_type = gripper_type
+        self.gripper_do_id = gripper_do_id
+        self.gripper_do_close_status = gripper_do_close_status
+        self._last_gripper_do_status = None
         self._last_servoj_time = None
         self._last_gripper_percent_closed = 50.0
         # Gates whether _set_action actually transmits ServoJ/gripper commands to
@@ -95,7 +110,7 @@ class RealFairino5EnvBase(RealEnvBase):
         self.command_smoothing_alpha = command_smoothing_alpha
         self._filtered_arm_joint_pos_command = None
         # TODO: Verify against the official FR5 max joint speed before running on real hardware.
-        self.joint_vel_limit = np.deg2rad(90) # [rad/s]
+        self.joint_vel_limit = np.deg2rad(30) # [rad/s]
         self.body_config_list = [
             ArmConfig(
                 arm_urdf_path=path.join(
@@ -133,24 +148,40 @@ class RealFairino5EnvBase(RealEnvBase):
             self.arm_joint_pos_actual = np.array(arm_joint_pos)
             print(f"[{self.__class__.__name__}] Finish connecting the Fairino arm.")
 
-            # Connect to LinkerHand gripper
-            print(f"[{self.__class__.__name__}] Start connecting the LinkerHand gripper.")
-            try:
-                from LinkerHand.linker_hand_api import LinkerHandApi
-            except ImportError as e:
-                raise RuntimeError(
-                    f"[{self.__class__.__name__}] Failed to import LinkerHand. "
-                    f"Please ensure the LinkerHand package is installed. Error: {e}"
+            if self.gripper_type == "linker_hand":
+                # Connect to LinkerHand gripper
+                print(f"[{self.__class__.__name__}] Start connecting the LinkerHand gripper.")
+                try:
+                    from LinkerHand.linker_hand_api import LinkerHandApi
+                except ImportError as e:
+                    raise RuntimeError(
+                        f"[{self.__class__.__name__}] Failed to import LinkerHand. "
+                        f"Please ensure the LinkerHand package is installed. Error: {e}"
+                    )
+                self.gripper = LinkerHandApi(
+                    hand_type=gripper_hand_type,
+                    hand_joint="O6",
+                    modbus=gripper_modbus_port,
                 )
-            self.gripper = LinkerHandApi(
-                hand_type=gripper_hand_type,
-                hand_joint="O6",
-                modbus=gripper_modbus_port,
-            )
-            gripper_finger_order = self.gripper.get_finger_order()
-            self.gripper_num_joints = len(gripper_finger_order)
-            self.gripper_thumb_abduction_idx = gripper_finger_order.index("thumb_cmc_yaw")
-            print(f"[{self.__class__.__name__}] Finish connecting the LinkerHand gripper.")
+                gripper_finger_order = self.gripper.get_finger_order()
+                self.gripper_num_joints = len(gripper_finger_order)
+                self.gripper_thumb_abduction_idx = gripper_finger_order.index(
+                    "thumb_cmc_yaw"
+                )
+                print(f"[{self.__class__.__name__}] Finish connecting the LinkerHand gripper.")
+            elif self.gripper_type == "tool_do":
+                # The IAI gripper is wired to the Fairino's own tool DO -- no
+                # separate connection is needed, self.robot.SetToolDO/GetToolDO
+                # (already connected above) is used directly in _set_action/_get_obs.
+                self.gripper = None
+                print(
+                    f"[{self.__class__.__name__}] Using IAI gripper via tool DO"
+                    f"{self.gripper_do_id} (no separate gripper connection)."
+                )
+            else:
+                raise ValueError(
+                    f"[{self.__class__.__name__}] Invalid gripper_type: {self.gripper_type}"
+                )
 
         # Connect to RealSense, Orbbec (femtobolt), and GelSight (only in
         # non-dry-run mode)
@@ -262,6 +293,23 @@ class RealFairino5EnvBase(RealEnvBase):
         # LinkerHand joint values are 0 (fully closed) to 255 (fully open)
         return int(round(np.clip(255.0 * (1.0 - percent_closed / 100.0), 0, 255)))
 
+    def _send_gripper_command(self, gripper_percent_closed):
+        if self.gripper_type == "linker_hand":
+            self.gripper.finger_move(pose=self._gripper_pose(gripper_percent_closed))
+        else:
+            # tool_do: no continuous width, just threshold to binary open/close.
+            do_status = (
+                self.gripper_do_close_status
+                if gripper_percent_closed >= 50.0
+                else 1 - self.gripper_do_close_status
+            )
+            # SetToolDO is a blocking XML-RPC call; only send it on a state
+            # change instead of every control-loop tick (unlike LinkerHand's
+            # finger_move, which is cheap enough to call every frame).
+            if do_status != self._last_gripper_do_status:
+                self._check_fr_code(self.robot.SetToolDO(self.gripper_do_id, do_status))
+                self._last_gripper_do_status = do_status
+
     def setup_input_device(self, input_device_name, motion_manager, overwrite_kwargs):
         if input_device_name == "spacemouse":
             InputDeviceClass = SpacemouseInputDevice
@@ -329,6 +377,18 @@ class RealFairino5EnvBase(RealEnvBase):
 
         self._filtered_arm_joint_pos_command = None
 
+        # Open the gripper BEFORE moving the arm, not after: if the gripper was
+        # left closed around something from a previous session, moving the arm
+        # first would drag/crush whatever it's holding. Independent of
+        # init_qpos's gripper value (which is also sent again after the move,
+        # below) so this happens even if init_qpos's gripper component is ever
+        # non-zero for some env variant.
+        print(f"[{self.__class__.__name__}] Opening gripper before moving the arm.")
+        if self.dry_run:
+            print(f"[{self.__class__.__name__}] [DRY RUN] Would open gripper.")
+        else:
+            self._send_gripper_command(0.0)
+
         if self.dry_run:
             print(
                 f"[{self.__class__.__name__}] [DRY RUN] Would move to reset pose: "
@@ -365,7 +425,7 @@ class RealFairino5EnvBase(RealEnvBase):
             gripper_percent_closed = float(
                 self.init_qpos[self.body_config_list[0].gripper_joint_idxes][0]
             )
-            self.gripper.finger_move(pose=self._gripper_pose(gripper_percent_closed))
+            self._send_gripper_command(gripper_percent_closed)
 
         self._motion_enabled = True
 
@@ -451,8 +511,7 @@ class RealFairino5EnvBase(RealEnvBase):
             )
             self._check_fr_code(fr_code)
 
-            # Send command to LinkerHand gripper
-            self.gripper.finger_move(pose=self._gripper_pose(gripper_percent_closed))
+            self._send_gripper_command(gripper_percent_closed)
 
         # Wait
         elapsed_duration = time.time() - start_time
@@ -498,21 +557,51 @@ class RealFairino5EnvBase(RealEnvBase):
                 socket.setdefaulttimeout(None)
             self.arm_joint_pos_actual = arm_joint_pos.copy()
 
-            # Get state from LinkerHand gripper, falling back to the last known
-            # gripper position if the Modbus read fails.
-            try:
-                gripper_pose_raw = np.array(self.gripper.get_state(), dtype=np.float64)
-                finger_raw = np.delete(
-                    gripper_pose_raw, self.gripper_thumb_abduction_idx
-                )
-                gripper_percent_closed = 100.0 * (1.0 - finger_raw.mean() / 255.0)
-                self._last_gripper_percent_closed = gripper_percent_closed
-            except Exception as e:
-                print(
-                    f"[{self.__class__.__name__}] Failed to read gripper state: {e}. "
-                    "Using last known gripper position."
-                )
-                gripper_percent_closed = self._last_gripper_percent_closed
+            if self.gripper_type == "linker_hand":
+                # Get state from LinkerHand gripper, falling back to the last known
+                # gripper position if the Modbus read fails.
+                try:
+                    gripper_pose_raw = np.array(
+                        self.gripper.get_state(), dtype=np.float64
+                    )
+                    finger_raw = np.delete(
+                        gripper_pose_raw, self.gripper_thumb_abduction_idx
+                    )
+                    gripper_percent_closed = 100.0 * (1.0 - finger_raw.mean() / 255.0)
+                    self._last_gripper_percent_closed = gripper_percent_closed
+                except Exception as e:
+                    print(
+                        f"[{self.__class__.__name__}] Failed to read gripper state: {e}. "
+                        "Using last known gripper position."
+                    )
+                    gripper_percent_closed = self._last_gripper_percent_closed
+            else:
+                # tool_do: no width sensor, only the binary DO state. Trust
+                # _last_gripper_do_status (updated whenever we command it, see
+                # _send_gripper_command) instead of polling GetToolDO() here --
+                # that was an extra synchronous XML-RPC round trip on every
+                # single control-loop tick (in addition to the
+                # GetActualJointPosRadian/GetActualJointSpeedsDegree calls
+                # above), and ServoJ's cmdT pacing (see _set_action) is
+                # sensitive to exactly this kind of added loop-time jitter --
+                # traced to visibly jerky teleop motion. This does mean an
+                # out-of-band DO toggle (e.g. from a teach pendant) won't be
+                # reflected here, only DO changes this process itself sent.
+                try:
+                    if self._last_gripper_do_status is None:
+                        raise RuntimeError("no gripper command sent yet")
+                    gripper_percent_closed = (
+                        100.0
+                        if self._last_gripper_do_status == self.gripper_do_close_status
+                        else 0.0
+                    )
+                    self._last_gripper_percent_closed = gripper_percent_closed
+                except Exception as e:
+                    print(
+                        f"[{self.__class__.__name__}] Failed to read gripper DO state: "
+                        f"{e}. Using last known gripper position."
+                    )
+                    gripper_percent_closed = self._last_gripper_percent_closed
             gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
             gripper_joint_vel = np.zeros(1)
 

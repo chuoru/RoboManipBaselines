@@ -19,9 +19,10 @@ calibrate_vive_world_frame.py.
 
 --roll_axis/--pitch_axis/--yaw_axis (each one of +x/-x/+y/-y/+z/-z) say what each
 test rotation should correspond to in TCP-local coordinates. Defaults assume a TCP
-frame where +z is forward, +y is left, +x is down: roll (twisting the wrist like a
+frame where +z is forward, +x is right, +y is down (this matches the FR5 gripper's
+actual TCP convention, confirmed on real hardware): roll (twisting the wrist like a
 screwdriver, about the forward axis) = +z; pitch (nodding, about the left/right
-axis) = -y; yaw (turning, about the up/down axis) = -x. Override them if your
+axis) = -x; yaw (turning, about the up/down axis) = +y. Override them if your
 robot's TCP convention differs, or if these labels don't match how you think about
 the three rotations.
 
@@ -64,16 +65,47 @@ def wait_for_tracker(pysurvive, ctx, serial_number, wait_sec):
     )
 
 
-def capture_rotation(tracker_object, label):
+def capture_rotation(tracker_object, label, sample_sec=0.5, sample_hz=50.0):
+    """Average many samples over sample_sec while the tracker is held still,
+    instead of trusting a single instantaneous Pose() reading right when Enter
+    is pressed -- see the same fix in calibrate_vive_world_frame.py's
+    capture_position() for why (single-sample jitter directly becomes
+    calibration error)."""
     input(f"[calibrate] {label} Press Enter when ready and holding steady.")
-    pose, timecode = tracker_object.Pose()
-    if timecode <= 0:
+    print(f"[calibrate]   Sampling for {sample_sec}s -- keep holding still...")
+    rotations = []
+    start = time.time()
+    while time.time() - start < sample_sec:
+        pose, timecode = tracker_object.Pose()
+        if timecode > 0:
+            # libsurvive quaternions are stored as (w, x, y, z).
+            rotations.append(pin.Quaternion(*pose.Rot[:4]).toRotationMatrix())
+        time.sleep(1.0 / sample_hz)
+    if len(rotations) == 0:
         raise RuntimeError(
             "[calibrate] Tracker has no valid pose yet -- make sure it's visible "
             "to both lighthouses and retry."
         )
-    # libsurvive quaternions are stored as (w, x, y, z).
-    return pin.Quaternion(*pose.Rot[:4]).toRotationMatrix()
+    # Average rotations via the same log/exp machinery used elsewhere in this
+    # codebase (e.g. ArmManager.inverse_kinematics), not a naive matrix mean
+    # (which isn't itself a valid rotation).
+    r_mean = rotations[0]
+    for _ in range(10):
+        rotvecs = [pin.log3(r_mean.T @ r) for r in rotations]
+        mean_rotvec = np.mean(rotvecs, axis=0)
+        r_mean = r_mean @ pin.exp3(mean_rotvec)
+        if np.linalg.norm(mean_rotvec) < 1e-8:
+            break
+    jitter_deg = np.rad2deg(
+        np.mean([np.linalg.norm(pin.log3(r_mean.T @ r)) for r in rotations])
+    )
+    if jitter_deg > 2.0:
+        print(
+            f"[calibrate]   WARNING: {jitter_deg:.1f} deg of jitter across "
+            f"{len(rotations)} samples -- hold the tracker more still and "
+            "consider retrying this step."
+        )
+    return r_mean
 
 
 def fit_rotation(measured_local, desired_local):
@@ -98,8 +130,8 @@ def main():
         "teleop/check_vive_devices.py",
     )
     parser.add_argument("--roll_axis", default="+z", choices=AXIS_VECTORS.keys())
-    parser.add_argument("--pitch_axis", default="-y", choices=AXIS_VECTORS.keys())
-    parser.add_argument("--yaw_axis", default="-x", choices=AXIS_VECTORS.keys())
+    parser.add_argument("--pitch_axis", default="-x", choices=AXIS_VECTORS.keys())
+    parser.add_argument("--yaw_axis", default="+y", choices=AXIS_VECTORS.keys())
     parser.add_argument("--wait_sec", type=float, default=10.0)
     args = parser.parse_args()
 
@@ -143,8 +175,18 @@ def main():
     except KeyboardInterrupt:
         print("\n[calibrate] Interrupted by Ctrl+C.")
         return
-    finally:
-        pysurvive.simple_close(ctx.ptr)
+
+    # Compute and print the result BEFORE calling pysurvive.simple_close()
+    # below: that native call has been observed to hang indefinitely (even
+    # Ctrl+C can't interrupt it) on this rig -- see the same fix in
+    # calibrate_vive_world_frame.py.
+    print("[calibrate] Pairwise angles between measured rotation axes (should be ~90 deg):")
+    axis_pairs = (("roll", "pitch", 0, 1), ("roll", "yaw", 0, 2), ("pitch", "yaw", 1, 2))
+    for label_a, label_b, i, j in axis_pairs:
+        cos_angle = np.clip(np.dot(local_axes[i], local_axes[j]), -1.0, 1.0)
+        angle_deg = np.rad2deg(np.arccos(cos_angle))
+        flag = " <-- NOT ORTHOGONAL" if abs(angle_deg - 90.0) > 10.0 else ""
+        print(f"    {label_a}-{label_b}: {angle_deg:.2f} deg{flag}")
 
     measured_local = np.stack(local_axes, axis=1)  # (3, 3): columns = roll,pitch,yaw
 
@@ -176,6 +218,14 @@ def main():
     print("  vive_to_eef_frame_rotation:")
     for row in rotation:
         print(f"    - [{row[0]:.6f}, {row[1]:.6f}, {row[2]:.6f}]")
+
+    print(
+        "\n[calibrate] Closing libsurvive context (this has been observed to "
+        "hang on this rig -- if nothing happens within a few seconds, the "
+        "result above is already valid; kill this process from another "
+        "terminal, e.g. `pkill -f calibrate_vive_rotation`)."
+    )
+    pysurvive.simple_close(ctx.ptr)
 
 
 if __name__ == "__main__":

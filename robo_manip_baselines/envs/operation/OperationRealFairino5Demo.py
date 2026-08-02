@@ -34,6 +34,9 @@ class OperationRealFairino5Demo:
         pointcloud_camera_ids=None,
         gripper_hand_type="right",
         gripper_modbus_port="/dev/ttyUSB0",
+        gripper_type="tool_do",
+        gripper_do_id=1,
+        gripper_do_close_status=0,
         dry_run=False,
     ):
         self.robot_ip = robot_ip
@@ -42,6 +45,9 @@ class OperationRealFairino5Demo:
         self.pointcloud_camera_ids = pointcloud_camera_ids
         self.gripper_hand_type = gripper_hand_type
         self.gripper_modbus_port = gripper_modbus_port
+        self.gripper_type = gripper_type
+        self.gripper_do_id = gripper_do_id
+        self.gripper_do_close_status = gripper_do_close_status
         self.dry_run = dry_run
         super().__init__()
 
@@ -54,6 +60,9 @@ class OperationRealFairino5Demo:
             pointcloud_camera_ids=self.pointcloud_camera_ids,
             gripper_hand_type=self.gripper_hand_type,
             gripper_modbus_port=self.gripper_modbus_port,
+            gripper_type=self.gripper_type,
+            gripper_do_id=self.gripper_do_id,
+            gripper_do_close_status=self.gripper_do_close_status,
             dry_run=self.dry_run,
         )
 

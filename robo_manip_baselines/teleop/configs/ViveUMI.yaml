@@ -1,0 +1,32 @@
+# serial_number is the TRACKER's stable hardware serial (starts with "LHR-"),
+# NOT the lighthouse's serial (starts with "LHB-"). Run
+# `python ./teleop/check_vive_devices.py` to find your tracker's serial.
+device_params:
+  name: primary
+  serial_number: LHR-904A2704
+# This tracker is enumerated by libsurvive as a "WM0" (Wireless Watchman /
+# controller) object. Its button briefly stopped being reported by
+# pysurvive.simple_object_get_button_mask() (button_mask stuck at 0x0000) --
+# traced to a stale BLE/RF pairing state, fixed by power-cycling the tracker
+# (button_mask then correctly changed on press, e.g. to 0x0008). If the
+# tracker's button ever seems unresponsive again, power-cycle it and re-check
+# with teleop/check_vive_devices.py before assuming it's a code issue --
+# gripper_key_bindings (keyboard fallback) is no longer needed/set here.
+# vive_to_eef_frame_rotation: calibrated with calibrate_vive_rotation.py against
+# this UMI rig's actual tracker mounting (fit quality: roll 2.03 deg, pitch 5.09
+# deg, yaw 4.70 deg error; pitch-yaw measured axes were ~9 deg off orthogonal --
+# re-run calibrate_vive_rotation.py to tighten this further if pitch/yaw motion
+# feels cross-coupled in practice).
+pos_scale: 1.0
+vive_to_eef_frame_rotation:
+  - [0.441244, -0.850212, 0.287130]
+  - [0.398228, 0.472247, 0.786382]
+  - [-0.804188, -0.232643, 0.546954]
+# vive_world_to_base_frame_rotation: calibrated with calibrate_vive_world_frame.py
+# against the real FR5's Base-coordinate jog directions (fit quality < 1.5 deg on
+# all 3 axes, pairwise angles between the 3 measured directions all within ~2 deg
+# of 90 deg -- see conversation history for the earlier miscalibrated attempts).
+vive_world_to_base_frame_rotation:
+  - [0.997852, 0.059213, 0.028024]
+  - [-0.060103, 0.997677, 0.032063]
+  - [-0.026061, -0.033679, 0.999093]
