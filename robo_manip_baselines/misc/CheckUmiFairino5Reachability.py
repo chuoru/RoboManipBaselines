@@ -8,11 +8,19 @@ ties the tracker to the robot base -- see teleop/README.md and
 teleop/calibrate_vive_world_frame.py). So this script does not claim to compute
 the actual retargeting transform; it only applies a naive delta-pose retarget
 (the UMI trajectory's motion relative to its first frame, added onto the FR5's
-init_qpos EEF pose with an identity rotation frame) to sanity-check that the
+init_qpos EEF pose with an identity rotation frame for translation) to sanity-check that the
 *scale* of motion in the recorded demo is plausible for the FR5 to execute --
 i.e. it stays within the arm's reach and joint limits and does not run through
 a singularity. It is not a substitute for calibrating the real retargeting
 transform before running on hardware.
+
+Note on rotation: the recorded MEASURED_EEF_POSE already has the UMI rig's
+vive_to_eef_frame_rotation conjugation baked in by ViveInputDevice.set_command_data
+at recording time (RealUMIEnvBase._set_action echoes the command straight back
+as "measured", since the rig has no physical plant to converge). So the
+rotation delta computed here between recorded frames is used as-is -- it must
+NOT be conjugated by vive_to_eef_frame_rotation again, which would apply that
+rotation twice.
 """
 
 import argparse
@@ -20,7 +28,6 @@ import os
 
 import numpy as np
 import pinocchio as pin
-import yaml
 
 import robo_manip_baselines.envs as envs_pkg
 from robo_manip_baselines.common import DataKey, RmbData
@@ -50,17 +57,6 @@ def parse_argument():
         type=float,
         default=1.0,
         help="scale applied to the UMI translation delta before retargeting",
-    )
-    parser.add_argument(
-        "--vive_config",
-        type=str,
-        default=None,
-        help="path to a teleop Vive config yaml (e.g. teleop/configs/ViveUMI.yaml) "
-        "to source vive_to_eef_frame_rotation from, instead of identity. Its "
-        "vive_world_to_base_frame_rotation is NOT used, since it was calibrated "
-        "against a different rig/base and does not apply to the FR5 base frame "
-        "(see module docstring) -- translation is retargeted with identity "
-        "rotation regardless of this flag.",
     )
     parser.add_argument(
         "--plot",
@@ -121,6 +117,22 @@ def filter_glitches(se3_list, time_seq, max_linear_vel, max_angular_vel):
     return filtered_se3_list, skipped_mask
 
 
+def plot_pose_triad(ax, position, rotation, length, label=None):
+    """Draw one RGB xyz-axis triad (quiver arrows) at `position` oriented by
+    `rotation`, on a 3D `Axes3D`. Used to make rotation, not just position,
+    visually inspectable along a plotted trajectory."""
+    colors = ("r", "g", "b")
+    for axis_idx, color in enumerate(colors):
+        axis_dir = rotation[:, axis_idx]
+        ax.quiver(
+            *position,
+            *(length * axis_dir),
+            color=color,
+            linewidth=1.5,
+            label=label if axis_idx == 0 else None,
+        )
+
+
 def solve_ik(model, data, q_init, target_se3, eef_joint_id):
     """Damped least-squares IK, same formulation as ArmManager.inverse_kinematics,
     but iterated to convergence (or IK_MAX_ITERS) instead of one step per call --
@@ -163,15 +175,6 @@ def main():
     arm_low = RealFairino5EnvBase.action_space.low[0:6].astype(np.float64)
     arm_high = RealFairino5EnvBase.action_space.high[0:6].astype(np.float64)
 
-    if args.vive_config is None:
-        vive_to_eef_frame_rotation = np.eye(3)
-    else:
-        with open(args.vive_config, "r") as f:
-            vive_config = yaml.safe_load(f)
-        vive_to_eef_frame_rotation = np.array(
-            vive_config["vive_to_eef_frame_rotation"], dtype=np.float64
-        )
-
     q_arm = init_qpos[0:6].copy()
     pin.forwardKinematics(model, data, q_arm)
     init_se3 = data.oMi[EEF_JOINT_ID].copy()
@@ -200,27 +203,23 @@ def main():
     err_log = np.zeros(n_steps)
     converged_log = np.zeros(n_steps, dtype=bool)
     limit_violation_log = np.zeros(n_steps, dtype=bool)
+    target_se3_list = []
 
     for t in range(n_steps):
         umi_se3_t = umi_se3_list[t]
         # Naive retarget: translation delta (scaled) added in the FR5 base frame
         # with an identity base-frame rotation, since no real calibration exists
         # yet between this UMI rig and the FR5 base (see module docstring).
-        # Rotation delta is applied the same way ViveInputDevice.set_command_data
-        # does: a tracker-local rotation delta rotated into the EEF's own local
-        # (TCP) frame via vive_to_eef_frame_rotation (identity unless --vive_config
-        # is given).
+        # Rotation delta is used as-is: it already has vive_to_eef_frame_rotation
+        # baked in from recording (see module docstring's rotation note) --
+        # conjugating by it again here would apply it twice.
         target_translation = init_se3.translation + args.pos_scale * (
             umi_se3_t.translation - umi_se3_0.translation
         )
         delta_umi_rotation = umi_se3_0.rotation.T @ umi_se3_t.rotation
-        adjusted_rotation_delta = (
-            vive_to_eef_frame_rotation
-            @ delta_umi_rotation
-            @ vive_to_eef_frame_rotation.T
-        )
-        target_rotation = init_se3.rotation @ adjusted_rotation_delta
+        target_rotation = init_se3.rotation @ delta_umi_rotation
         target_se3 = pin.SE3(target_rotation, target_translation)
+        target_se3_list.append(target_se3)
 
         q_arm, err_norm, _n_iters = solve_ik(model, data, q_arm, target_se3, EEF_JOINT_ID)
 
@@ -288,6 +287,56 @@ def main():
         fig.tight_layout()
         fig.savefig(args.plot)
         print(f"[CheckUmiFairino5Reachability] Saved plot to {args.plot}")
+
+        # 3D pose-trajectory comparison: recorded UMI motion (as delta from
+        # its first frame) vs. the retargeted FR5 target motion (as delta
+        # from init_se3). This makes a rotation-direction mismatch between
+        # the two directly visible, rather than only inferred from the
+        # joint-angle plot above.
+        umi_positions = np.array(
+            [se3.translation - umi_se3_0.translation for se3 in umi_se3_list]
+        )
+        target_positions = np.array(
+            [se3.translation - init_se3.translation for se3 in target_se3_list]
+        )
+
+        fig3d = plt.figure(figsize=(8, 8))
+        ax3d = fig3d.add_subplot(projection="3d")
+        ax3d.plot(*umi_positions.T, color="tab:blue", label="recorded UMI (delta)")
+        ax3d.plot(
+            *target_positions.T, color="tab:orange", label="retargeted FR5 (delta)"
+        )
+
+        triad_length = 0.15 * max(np.ptp(umi_positions, axis=0).max(), 1e-3)
+        triad_stride = max(1, n_steps // 15)
+        for t in range(0, n_steps, triad_stride):
+            plot_pose_triad(
+                ax3d,
+                umi_positions[t],
+                umi_se3_0.rotation.T @ umi_se3_list[t].rotation,
+                triad_length,
+            )
+            plot_pose_triad(
+                ax3d,
+                target_positions[t],
+                init_se3.rotation.T @ target_se3_list[t].rotation,
+                triad_length,
+            )
+
+        ax3d.set_xlabel("x [m]")
+        ax3d.set_ylabel("y [m]")
+        ax3d.set_zlabel("z [m]")
+        ax3d.set_title(
+            "Recorded vs. retargeted EEF pose trajectory (delta from start, RGB = xyz)"
+        )
+        ax3d.legend()
+        fig3d.tight_layout()
+        base, ext = os.path.splitext(args.plot)
+        pose3d_path = f"{base}_pose3d{ext}"
+        fig3d.savefig(pose3d_path)
+        print(
+            f"[CheckUmiFairino5Reachability] Saved 3D pose comparison plot to {pose3d_path}"
+        )
 
 
 if __name__ == "__main__":

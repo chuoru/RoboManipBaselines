@@ -9,8 +9,8 @@ teleop/TeleopBase.py's ReplayPhase), this script retargets across envs: the
 UMI rig's recorded EEF pose has no calibrated common frame with the FR5 base
 (see misc/CheckUmiFairino5Reachability.py's docstring), so it cannot be
 replayed as-is. The same naive delta-pose retarget verified there (translation
-delta added onto the FR5's init-pose EEF position; rotation delta rotated via
---vive_config's vive_to_eef_frame_rotation) is reused here, but IK is now done
+delta added onto the FR5's init-pose EEF position; rotation delta used as-is,
+see this docstring's rotation note below) is reused here, but IK is now done
 through the env's own ArmManager (one damped-least-squares Newton step per
 frame, warm-started from the previous frame -- exactly what real teleop does)
 instead of iterating to convergence offline.
@@ -20,6 +20,14 @@ command it would have sent). Pass --real only once you have verified the
 printed commands look sane (e.g. via CheckUmiFairino5Reachability.py and a
 dry-run read-through of this script's own printed output) and are ready to
 move the physical arm.
+
+Note on rotation: the recorded MEASURED_EEF_POSE already has the UMI rig's
+vive_to_eef_frame_rotation conjugation baked in by ViveInputDevice.set_command_data
+at recording time (RealUMIEnvBase._set_action echoes the command straight back
+as "measured", since the rig has no physical plant to converge). So the
+rotation delta computed here between recorded frames is used as-is -- it must
+NOT be conjugated by vive_to_eef_frame_rotation again, which would apply that
+rotation twice.
 """
 
 import argparse
@@ -28,7 +36,6 @@ import time
 import gymnasium as gym
 import numpy as np
 import pinocchio as pin
-import yaml
 
 from robo_manip_baselines.common import ArmManager, DataKey, RmbData
 
@@ -62,13 +69,6 @@ def parse_argument():
         type=float,
         default=1.0,
         help="scale applied to the UMI translation delta before retargeting",
-    )
-    parser.add_argument(
-        "--vive_config",
-        type=str,
-        default=None,
-        help="path to a teleop Vive config yaml (e.g. teleop/configs/ViveUMI.yaml) "
-        "to source vive_to_eef_frame_rotation from, instead of identity",
     )
     parser.add_argument(
         "--max_linear_vel",
@@ -162,15 +162,6 @@ def filter_glitches(se3_list, time_seq, max_linear_vel, max_angular_vel):
 def main():
     args = parse_argument()
 
-    if args.vive_config is None:
-        vive_to_eef_frame_rotation = np.eye(3)
-    else:
-        with open(args.vive_config, "r") as f:
-            vive_config = yaml.safe_load(f)
-        vive_to_eef_frame_rotation = np.array(
-            vive_config["vive_to_eef_frame_rotation"], dtype=np.float64
-        )
-
     print(f"[ReplayUmiOnFairino5] Load {args.rmb_filename}")
     with RmbData(args.rmb_filename) as rmb_data:
         umi_pose = rmb_data[DataKey.MEASURED_EEF_POSE][:]  # (T,7): tx,ty,tz,qw,qx,qy,qz
@@ -222,19 +213,17 @@ def main():
 
     # Same naive delta-pose retarget as CheckUmiFairino5Reachability.py -- see
     # that module's docstring for why this is not yet a real calibrated
-    # retargeting transform.
+    # retargeting transform. Rotation delta is used as-is: it already has
+    # vive_to_eef_frame_rotation baked in from recording (see this module's
+    # docstring's rotation note) -- conjugating by it again here would apply
+    # it twice.
     target_se3_list = []
     for umi_se3_t in umi_se3_list:
         target_translation = init_se3.translation + args.pos_scale * (
             umi_se3_t.translation - umi_se3_0.translation
         )
         delta_umi_rotation = umi_se3_0.rotation.T @ umi_se3_t.rotation
-        adjusted_rotation_delta = (
-            vive_to_eef_frame_rotation
-            @ delta_umi_rotation
-            @ vive_to_eef_frame_rotation.T
-        )
-        target_rotation = init_se3.rotation @ adjusted_rotation_delta
+        target_rotation = init_se3.rotation @ delta_umi_rotation
         target_se3_list.append(pin.SE3(target_rotation, target_translation))
 
     target_se3_list, gripper_list = stretch_trajectory(

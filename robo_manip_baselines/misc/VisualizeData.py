@@ -12,7 +12,16 @@ from robo_manip_baselines.common import (
     DataManager,
     convert_depth_image_to_pointcloud,
     crop_and_resize,
+    get_rot_pos_from_pose,
 )
+
+
+def plot_pose_triad(ax, position, rotation, length):
+    """Draw one RGB xyz-axis triad (quiver arrows) at `position` oriented by
+    `rotation`, on a 3D `Axes3D`. Makes rotation, not just position, visually
+    inspectable along a plotted pose trajectory."""
+    for axis_idx, color in enumerate(("r", "g", "b")):
+        ax.quiver(*position, *(length * rotation[:, axis_idx]), color=color, linewidth=1.5)
 
 
 def parse_argument():
@@ -133,15 +142,21 @@ class VisualizeData:
     def setup_plot(self):
         plt.rcParams["keymap.quit"] = ["q", "escape"]
 
+        n_rows = len(self.camera_names) + 1
+        n_cols = 5
         self.fig, self.ax = plt.subplots(
-            len(self.camera_names) + 1, 4, figsize=(16.0, 12.0), constrained_layout=True
+            n_rows, n_cols, figsize=(19.0, 12.0), constrained_layout=True
         )
-        for ax_idx in range(1, len(self.camera_names) + 1):
+        for ax_idx in range(1, n_rows):
             self.ax[ax_idx, 2].remove()
             self.ax[ax_idx, 3].remove()
+            self.ax[ax_idx, 4].remove()
             self.ax[ax_idx, 2] = self.fig.add_subplot(
-                len(self.camera_names) + 1, 4, 4 * (ax_idx + 1) - 1, projection="3d"
+                n_rows, n_cols, n_cols * ax_idx + 3, projection="3d"
             )
+
+        self.ax[0, 4].remove()
+        self.ax[0, 4] = self.fig.add_subplot(n_rows, n_cols, n_cols, projection="3d")
 
         self.quit_flag = False
         self.scatter_list = [None] * len(self.camera_names)
@@ -189,12 +204,34 @@ class VisualizeData:
         self.ax02_twin = self.ax[0, 2].twinx()
         self.ax02_twin.set_ylim(-1.0, 1.0)
 
+        eef_pos = eef_pose[:, 0:3]
+        self.pose3d_title = "eef pose trajectory (3D, RGB = xyz)"
+        self.pose3d_xlim = (eef_pos[:, 0].min(), eef_pos[:, 0].max())
+        self.pose3d_ylim = (eef_pos[:, 1].min(), eef_pos[:, 1].max())
+        self.pose3d_zlim = (eef_pos[:, 2].min(), eef_pos[:, 2].max())
+        self.pose3d_triad_length = 0.15 * max(np.ptp(eef_pos, axis=0).max(), 1e-3)
+        self.setup_pose3d_axis()
+
         if DataKey.MEASURED_EEF_WRENCH in self.data_manager.all_data_seq.keys():
             eef_wrench = self.data_manager.get_data_seq(DataKey.MEASURED_EEF_WRENCH)
             self.ax[0, 3].set_ylim(eef_wrench.min(), eef_wrench.max())
         else:
             if self.ax[0, 3] in self.fig.axes:
                 self.ax[0, 3].remove()
+
+    def setup_pose3d_axis(self):
+        # cla() (called each frame to clear the previous frame's trajectory
+        # line/triads, since Axes3D.quiver's Line3DCollection artists aren't
+        # picked up by the Line2D-only clear_axis() used elsewhere) wipes the
+        # title/labels/limits too, so this re-applies them.
+        ax = self.ax[0, 4]
+        ax.set_title(self.pose3d_title, fontsize=12)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("z")
+        ax.set_xlim(*self.pose3d_xlim)
+        ax.set_ylim(*self.pose3d_ylim)
+        ax.set_zlim(*self.pose3d_zlim)
 
     def setup_video(self, output_mp4_filename, mp4_codec):
         self.mp4_codec = mp4_codec
@@ -390,6 +427,27 @@ class VisualizeData:
                 self.ax[0, 3].plot(
                     time_list, np.array(self.data_list[DataKey.MEASURED_EEF_WRENCH])
                 )
+
+            self.ax[0, 4].cla()
+            self.setup_pose3d_axis()
+            measured_pose_arr = np.array(self.data_list[DataKey.MEASURED_EEF_POSE])
+            command_pose_arr = np.array(self.data_list[DataKey.COMMAND_EEF_POSE])
+            self.ax[0, 4].plot3D(
+                *measured_pose_arr[:, :3].T, color="tab:blue", label="measured"
+            )
+            self.ax[0, 4].plot3D(
+                *command_pose_arr[:, :3].T,
+                color="tab:orange",
+                linestyle="--",
+                label="command",
+            )
+            triad_stride = max(1, len(measured_pose_arr) // 15)
+            for pose_idx in range(0, len(measured_pose_arr), triad_stride):
+                rotation, position = get_rot_pos_from_pose(measured_pose_arr[pose_idx, :7])
+                plot_pose_triad(
+                    self.ax[0, 4], position, rotation, self.pose3d_triad_length
+                )
+            self.ax[0, 4].legend(fontsize=8)
 
             for camera_idx, camera_name in enumerate(self.camera_names):
                 rgb_key = DataKey.get_rgb_image_key(camera_name)
