@@ -61,6 +61,12 @@ register(
     entry_point="robo_manip_baselines.envs.mujoco:MujocoXarm7PushtEnv",
 )
 
+## Fairino5
+register(
+    id="robo_manip_baselines/MujocoFairino5CableEnv-v0",
+    entry_point="robo_manip_baselines.envs.mujoco:MujocoFairino5CableEnv",
+)
+
 ## Franka Emika Panda
 register(
     id="robo_manip_baselines/MujocoPandaCableEnv-v0",
