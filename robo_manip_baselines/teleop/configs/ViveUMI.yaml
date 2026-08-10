@@ -19,14 +19,14 @@ device_params:
 # feels cross-coupled in practice).
 pos_scale: 1.0
 vive_to_eef_frame_rotation:
-  - [0.441244, -0.850212, 0.287130]
-  - [0.398228, 0.472247, 0.786382]
-  - [-0.804188, -0.232643, 0.546954]
+  - [-0.990190, -0.130799, -0.049141]
+  - [-0.029629, -0.147142, 0.988672]
+  - [-0.136548, 0.980429, 0.141823]
 # vive_world_to_base_frame_rotation: calibrated with calibrate_vive_world_frame.py
 # against the real FR5's Base-coordinate jog directions (fit quality < 1.5 deg on
 # all 3 axes, pairwise angles between the 3 measured directions all within ~2 deg
 # of 90 deg -- see conversation history for the earlier miscalibrated attempts).
 vive_world_to_base_frame_rotation:
-  - [0.997852, 0.059213, 0.028024]
-  - [-0.060103, 0.997677, 0.032063]
-  - [-0.026061, -0.033679, 0.999093]
+  - [0.963316, 0.264909, 0.042959]
+  - [-0.265669, 0.963977, 0.012966]
+  - [-0.037977, -0.023903, 0.998993]

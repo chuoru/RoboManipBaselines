@@ -3,6 +3,21 @@ import io
 import os
 
 import cv2
+
+# cv2's own __init__ points QT_QPA_PLATFORM_PLUGIN_PATH at its bundled
+# cv2/qt/plugins dir (built against cv2's own bundled libxcb) so cv2.imshow
+# works standalone. robo_manip_baselines/__init__.py separately preloads the
+# system libxcb globally (to fix a PyAV/cv2.imshow deadlock -- see that
+# file), which shadows cv2's bundled libxcb copy and makes cv2's bundled xcb
+# plugin fail to load ("Could not load the Qt platform plugin xcb", aborting)
+# -- this script doesn't use cv2.imshow, only matplotlib's Qt window
+# (plt.show() below), so it's safe (and necessary) to drop the env var here
+# and let Qt fall back to PyQt5's own bundled plugins dir instead, which is
+# consistent with the preloaded system libxcb. Do NOT hoist this into
+# robo_manip_baselines/__init__.py: teleop/TeleopBase.py's cv2.imshow camera
+# preview needs QT_QPA_PLATFORM_PLUGIN_PATH left pointing at cv2's plugins.
+os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+
 import matplotlib.pylab as plt
 import numpy as np
 from tqdm import tqdm
@@ -145,7 +160,11 @@ class VisualizeData:
         n_rows = len(self.camera_names) + 1
         n_cols = 5
         self.fig, self.ax = plt.subplots(
-            n_rows, n_cols, figsize=(19.0, 12.0), constrained_layout=True
+            n_rows,
+            n_cols,
+            figsize=(19.0, 12.0),
+            constrained_layout=True,
+            squeeze=False,
         )
         for ax_idx in range(1, n_rows):
             self.ax[ax_idx, 2].remove()

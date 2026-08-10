@@ -2,17 +2,39 @@
 robot-less handheld rig -- see envs/real/umi/RealUMIEnvBase.py) is retargetable
 onto the real FR5 arm (RealFairino5DemoEnv), without moving any hardware.
 
-The UMI rig and the FR5 base have no calibrated common frame yet (unlike the
-teleoperated-robot envs, where ViveInputDevice's vive_world_to_base_frame_rotation
-ties the tracker to the robot base -- see teleop/README.md and
-teleop/calibrate_vive_world_frame.py). So this script does not claim to compute
-the actual retargeting transform; it only applies a naive delta-pose retarget
-(the UMI trajectory's motion relative to its first frame, added onto the FR5's
-init_qpos EEF pose with an identity rotation frame for translation) to sanity-check that the
-*scale* of motion in the recorded demo is plausible for the FR5 to execute --
-i.e. it stays within the arm's reach and joint limits and does not run through
-a singularity. It is not a substitute for calibrating the real retargeting
-transform before running on hardware.
+Without --vive_config, the UMI rig and the FR5 base have no calibrated common
+frame (unlike the teleoperated-robot envs, where ViveInputDevice's
+vive_world_to_base_frame_rotation ties the tracker to the robot base -- see
+teleop/README.md and teleop/calibrate_vive_world_frame.py), so this script
+falls back to a naive delta-pose retarget (the UMI trajectory's motion
+relative to its first frame, added onto the FR5's init_qpos EEF pose with an
+identity rotation frame for translation).
+
+--vive_config: pass the SAME teleop/configs/*.yaml used to record this demo
+(e.g. teleop/configs/ViveUMI.yaml) to use its calibrated
+vive_world_to_base_frame_rotation for the translation retarget instead,
+exactly like misc/ReplayUmiOnFairino5.py's --vive_config (see that module's
+docstring for the exact math/rationale -- both scripts must be given the
+SAME --vive_config for this check to actually predict that script's
+behavior). Its pos_scale is used as the --pos_scale default if --pos_scale
+is not passed explicitly.
+
+Either way, this sanity-checks that the *scale* of motion in the recorded
+demo is plausible for the FR5 to execute -- i.e. it stays within the arm's
+reach and joint limits and does not run through a singularity. It is not a
+substitute for calibrating the real retargeting transform before running on
+hardware.
+
+Manipulability check: beyond hard joint-limit/reachability failures, this
+also flags segments with LOW manipulability (small Jacobian minimum singular
+value) even when IK converges and limits are respected. This matters because
+low manipulability means a modest EEF-space motion demands disproportionately
+large joint motion -- confirmed on real hardware to be a distinct failure
+mode from "this segment was recorded fast": a segment with unremarkable
+recorded EEF speed still required 25-36 deg/s joint swings the arm couldn't
+track in real time, well past --time_scale slowdown in
+ReplayUmiOnFairino5.py. This check exists to catch that BEFORE moving real
+hardware, not just after.
 
 Note on rotation: the recorded MEASURED_EEF_POSE already has the UMI rig's
 vive_to_eef_frame_rotation conjugation baked in by ViveInputDevice.set_command_data
@@ -28,6 +50,7 @@ import os
 
 import numpy as np
 import pinocchio as pin
+import yaml
 
 import robo_manip_baselines.envs as envs_pkg
 from robo_manip_baselines.common import DataKey, RmbData
@@ -53,10 +76,24 @@ def parse_argument():
     )
     parser.add_argument("rmb_filename", type=str, help="UMI demo .rmb/.hdf5 file")
     parser.add_argument(
+        "--vive_config",
+        type=str,
+        default=None,
+        help="teleop/configs/*.yaml used to record this demo (e.g. "
+        "teleop/configs/ViveUMI.yaml) -- if given, its calibrated "
+        "vive_world_to_base_frame_rotation is used for the translation "
+        "retarget instead of the identity-rotation naive fallback (see "
+        "module docstring). Pass the SAME file you plan to pass to "
+        "ReplayUmiOnFairino5.py's --vive_config for this check to actually "
+        "predict that script's behavior. Its pos_scale is also used as the "
+        "--pos_scale default if --pos_scale is not passed explicitly.",
+    )
+    parser.add_argument(
         "--pos_scale",
         type=float,
-        default=1.0,
-        help="scale applied to the UMI translation delta before retargeting",
+        default=None,
+        help="scale applied to the UMI translation delta before retargeting "
+        "(default: the --vive_config's own pos_scale if given, else 1.0)",
     )
     parser.add_argument(
         "--plot",
@@ -81,7 +118,81 @@ def parse_argument():
         "angular speed than this (relative to the last accepted frame) are "
         "treated as Vive tracking glitches and skipped",
     )
+    parser.add_argument(
+        "--warmup_seconds",
+        type=float,
+        default=8.0,
+        help="[s] drop this much from the START of the recording, treating "
+        "it as the Vive tracker's multi-lighthouse pose-solver convergence "
+        "transient rather than real motion (see trim_warmup() in "
+        "misc/ReplayUmiOnFairino5.py -- same logic, kept in sync). Set <= 0 "
+        "to disable.",
+    )
+    parser.add_argument(
+        "--drift_linear_vel",
+        type=float,
+        default=0.01,
+        help="[m/s] below this frame-to-frame speed, motion is treated as "
+        "sensor drift rather than intentional movement and held instead of "
+        "followed (see filter_drift() in misc/ReplayUmiOnFairino5.py -- "
+        "same filter, kept in sync between both scripts). Set <= 0 to "
+        "disable.",
+    )
+    parser.add_argument(
+        "--drift_angular_vel",
+        type=float,
+        default=3.0,
+        help="[deg/s] same as --drift_linear_vel but for rotation",
+    )
+    parser.add_argument(
+        "--drift_confirm_frames",
+        type=int,
+        default=2,
+        help="require this many CONSECUTIVE frames above "
+        "--drift_linear_vel/--drift_angular_vel before treating it as real "
+        "motion (debounce against a single noisy/glitchy fast frame)",
+    )
+    parser.add_argument(
+        "--min_manipulability",
+        type=float,
+        default=0.16,
+        help="Jacobian minimum-singular-value threshold below which a kept "
+        "frame is flagged as low-manipulability (see module docstring's "
+        "manipulability check note). The real segment that caused tracking "
+        "trouble on hardware had a minimum singular value of 0.147-0.151 "
+        "against a ~0.18-0.19 baseline elsewhere in that same demo (verified "
+        "by re-running this exact check offline against that demo file after "
+        "the fact) -- this default is deliberately a bit above that observed "
+        "failure value, but re-check this number against your own arm/demo "
+        "rather than trusting it blindly.",
+    )
     return parser.parse_args()
+
+
+def trim_warmup(se3_list, time_seq, warmup_seconds=8.0):
+    """Drop the first warmup_seconds of a recording, on the theory that it's
+    the Vive tracker's multi-lighthouse pose-solver convergence transient,
+    not real operator motion. See
+    misc/ReplayUmiOnFairino5.py's copy of this function (same logic, plus a
+    gripper_list argument) for the full explanation and the measurement
+    (misc/MeasureViveDrift.py) this is grounded in -- kept in sync between
+    both scripts, since this check should reflect what
+    ReplayUmiOnFairino5.py will actually do.
+
+    Returns (se3_list, time_seq) starting from the first frame at or after
+    warmup_seconds. If the whole recording is shorter than warmup_seconds,
+    returns everything UNCHANGED instead of trimming to nothing."""
+    if warmup_seconds <= 0:
+        return list(se3_list), list(time_seq)
+    t0 = time_seq[0]
+    start_idx = None
+    for i, t in enumerate(time_seq):
+        if t - t0 >= warmup_seconds:
+            start_idx = i
+            break
+    if start_idx is None:
+        return list(se3_list), list(time_seq)
+    return list(se3_list[start_idx:]), list(time_seq[start_idx:])
 
 
 def filter_glitches(se3_list, time_seq, max_linear_vel, max_angular_vel):
@@ -115,6 +226,41 @@ def filter_glitches(se3_list, time_seq, max_linear_vel, max_angular_vel):
             last_valid_se3 = se3_list[t]
             last_valid_time = time_seq[t]
     return filtered_se3_list, skipped_mask
+
+
+def filter_drift(
+    se3_list, time_seq, max_linear_vel=0.01, max_angular_vel_deg=3.0, confirm_frames=2
+):
+    """Suppress slow sensor drift (Vive tracker IMU/lighthouse drift that
+    accumulates over many seconds even when the operator believes the
+    tracker is stationary). See misc/ReplayUmiOnFairino5.py's copy of this
+    function for the full explanation, real-data confirmation, and known
+    limitation (mitigates, does not eliminate, bursty drift) -- kept in sync
+    between both scripts, since this check should reflect what
+    ReplayUmiOnFairino5.py will actually do."""
+    max_angular_vel = np.deg2rad(max_angular_vel_deg)
+    held_se3 = se3_list[0]
+    filtered_se3_list = [held_se3]
+    streak = 0
+    for t in range(1, len(se3_list)):
+        dt = max(time_seq[t] - time_seq[t - 1], 1e-6)
+        linear_vel = (
+            np.linalg.norm(se3_list[t].translation - se3_list[t - 1].translation) / dt
+        )
+        angular_vel = (
+            np.linalg.norm(
+                pin.log3(se3_list[t - 1].rotation.T @ se3_list[t].rotation)
+            )
+            / dt
+        )
+        if linear_vel > max_linear_vel or angular_vel > max_angular_vel:
+            streak += 1
+        else:
+            streak = 0
+        if streak >= confirm_frames:
+            held_se3 = se3_list[t]
+        filtered_se3_list.append(held_se3)
+    return filtered_se3_list
 
 
 def plot_pose_triad(ax, position, rotation, length, label=None):
@@ -164,6 +310,36 @@ def solve_ik(model, data, q_init, target_se3, eef_joint_id):
 def main():
     args = parse_argument()
 
+    # vive_world_to_base_frame_rotation calibrates the room-to-base rotation
+    # applied to the translation delta -- see
+    # ReplayUmiOnFairino5.py's module docstring/ViveInputDevice.set_command_data
+    # for the exact math. vive_to_eef_frame_rotation from the same config is
+    # intentionally NOT loaded/reapplied here: it's already baked into the
+    # recorded MEASURED_EEF_POSE rotation at record time (see this module's
+    # docstring's rotation note), and reapplying it here would double it.
+    vive_world_to_base_frame_rotation = np.eye(3)
+    config_pos_scale = None
+    if args.vive_config is not None:
+        print(f"[CheckUmiFairino5Reachability] Load {args.vive_config}")
+        with open(args.vive_config, "r") as f:
+            vive_config = yaml.safe_load(f)
+        if "vive_world_to_base_frame_rotation" in vive_config:
+            vive_world_to_base_frame_rotation = np.array(
+                vive_config["vive_world_to_base_frame_rotation"], dtype=np.float64
+            )
+            assert vive_world_to_base_frame_rotation.shape == (3, 3)
+        else:
+            print(
+                "[CheckUmiFairino5Reachability] Warning: --vive_config has no "
+                "vive_world_to_base_frame_rotation; falling back to identity "
+                "(same as not passing --vive_config at all)."
+            )
+        config_pos_scale = vive_config.get("pos_scale")
+    pos_scale = args.pos_scale
+    if pos_scale is None:
+        pos_scale = config_pos_scale if config_pos_scale is not None else 1.0
+    print(f"[CheckUmiFairino5Reachability] Using pos_scale={pos_scale}")
+
     model = pin.buildModelFromUrdf(FR5_URDF_PATH)
     data = model.createData()
 
@@ -189,6 +365,31 @@ def main():
         pin.SE3(pin.Quaternion(*umi_pose[t, 3:7]), umi_pose[t, 0:3])
         for t in range(n_steps)
     ]
+
+    if args.warmup_seconds > 0:
+        trimmed_se3_list, trimmed_time_seq = trim_warmup(
+            umi_se3_list, time_seq, warmup_seconds=args.warmup_seconds
+        )
+        if len(trimmed_se3_list) == len(umi_se3_list):
+            print(
+                f"[CheckUmiFairino5Reachability] WARNING: recording is "
+                f"shorter than --warmup_seconds={args.warmup_seconds}s -- "
+                "nothing trimmed. This recording may be entirely pose-"
+                "solver convergence transient rather than real motion "
+                "(see trim_warmup())."
+            )
+        else:
+            print(
+                f"[CheckUmiFairino5Reachability] Trimmed first "
+                f"{args.warmup_seconds}s ({n_steps - len(trimmed_se3_list)}/"
+                f"{n_steps} frames) as Vive pose-solver warmup"
+            )
+        # back to ndarray: downstream code (e.g. the --plot block's
+        # `time_seq - time_seq[0]`) does vectorized numpy ops on the whole
+        # array, which a plain list doesn't support.
+        umi_se3_list, time_seq = trimmed_se3_list, np.array(trimmed_time_seq)
+        n_steps = len(umi_se3_list)
+
     umi_se3_list, skipped_mask = filter_glitches(
         umi_se3_list, time_seq, args.max_linear_vel, args.max_angular_vel
     )
@@ -197,27 +398,62 @@ def main():
         f"[CheckUmiFairino5Reachability] Skipped {n_skipped}/{n_steps} glitch "
         f"frames (> {args.max_linear_vel} m/s or {args.max_angular_vel} deg/s)"
     )
+
+    if args.drift_linear_vel > 0:
+        pre_drift_range = np.ptp(
+            np.array([se3.translation for se3 in umi_se3_list]), axis=0
+        )
+        umi_se3_list = filter_drift(
+            umi_se3_list,
+            time_seq,
+            max_linear_vel=args.drift_linear_vel,
+            max_angular_vel_deg=args.drift_angular_vel,
+            confirm_frames=args.drift_confirm_frames,
+        )
+        post_drift_range = np.ptp(
+            np.array([se3.translation for se3 in umi_se3_list]), axis=0
+        )
+        print(
+            f"[CheckUmiFairino5Reachability] Drift filter (< "
+            f"{args.drift_linear_vel} m/s or {args.drift_angular_vel} deg/s "
+            f"for {args.drift_confirm_frames} consecutive frames = held): "
+            f"position range {np.round(pre_drift_range, 4)} -> "
+            f"{np.round(post_drift_range, 4)} m"
+        )
+
     umi_se3_0 = umi_se3_list[0]
 
     q_log = np.zeros((n_steps, 6))
     err_log = np.zeros(n_steps)
     converged_log = np.zeros(n_steps, dtype=bool)
     limit_violation_log = np.zeros(n_steps, dtype=bool)
+    min_singular_value_log = np.zeros(n_steps)
     target_se3_list = []
 
     for t in range(n_steps):
         umi_se3_t = umi_se3_list[t]
-        # Naive retarget: translation delta (scaled) added in the FR5 base frame
-        # with an identity base-frame rotation, since no real calibration exists
-        # yet between this UMI rig and the FR5 base (see module docstring).
+        # Translation delta is rotated into the FR5 base frame by
+        # vive_world_to_base_frame_rotation (identity, i.e. the old naive
+        # behavior, unless --vive_config was given) -- see module docstring.
         # Rotation delta is used as-is: it already has vive_to_eef_frame_rotation
         # baked in from recording (see module docstring's rotation note) --
         # conjugating by it again here would apply it twice.
-        target_translation = init_se3.translation + args.pos_scale * (
-            umi_se3_t.translation - umi_se3_0.translation
+        #
+        # delta_umi_rotation is applied to init_se3.rotation by LEFT-multiply
+        # (world-frame composition), not right-multiply (body-frame
+        # composition) -- see ReplayUmiOnFairino5.py's matching comment for
+        # the full explanation and a real-demo numeric confirmation. In
+        # short: umi.urdf's floating joint has zero rotation offset from
+        # world_link, so delta_umi_rotation is effectively already a
+        # WORLD-frame quantity; right-multiplying it onto init_se3.rotation
+        # silently reinterprets each world-frame axis through FR5's own
+        # (unrelated) initial orientation, scrambling roll/pitch/yaw.
+        target_translation = init_se3.translation + pos_scale * (
+            vive_world_to_base_frame_rotation
+            @ (umi_se3_t.translation - umi_se3_0.translation)
         )
         delta_umi_rotation = umi_se3_0.rotation.T @ umi_se3_t.rotation
-        target_rotation = init_se3.rotation @ delta_umi_rotation
+        target_rotation = delta_umi_rotation @ init_se3.rotation
         target_se3 = pin.SE3(target_rotation, target_translation)
         target_se3_list.append(target_se3)
 
@@ -227,6 +463,14 @@ def main():
         err_log[t] = err_norm
         converged_log[t] = err_norm < IK_EPS
         limit_violation_log[t] = np.any(q_arm < arm_low) | np.any(q_arm > arm_high)
+
+        # Jacobian minimum singular value at the converged solution -- see
+        # module docstring's manipulability check note. A small value means a
+        # modest EEF-space motion through this configuration would demand
+        # disproportionately large joint motion, independent of whether IK
+        # converges or joint limits are respected.
+        J = pin.computeJointJacobian(model, data, q_arm, EEF_JOINT_ID)
+        min_singular_value_log[t] = np.linalg.svd(J, compute_uv=False).min()
 
     kept_mask = ~skipped_mask
     n_kept = int(kept_mask.sum())
@@ -244,6 +488,40 @@ def main():
         f"[CheckUmiFairino5Reachability] Joint-limit violations among kept "
         f"frames: {n_violations}/{n_kept} ({100.0 * n_violations / n_kept:.1f}%)"
     )
+    low_manip_mask = kept_mask & (min_singular_value_log < args.min_manipulability)
+    n_low_manip = int(low_manip_mask.sum())
+    print(
+        f"[CheckUmiFairino5Reachability] Low-manipulability frames (Jacobian "
+        f"min singular value < {args.min_manipulability}) among kept frames: "
+        f"{n_low_manip}/{n_kept} ({100.0 * n_low_manip / n_kept:.1f}%), "
+        f"min={min_singular_value_log[kept_mask].min():.3f}, "
+        f"mean={min_singular_value_log[kept_mask].mean():.3f}"
+    )
+    if n_low_manip > 0:
+        low_manip_idxes = np.nonzero(low_manip_mask)[0]
+        # Report contiguous runs, not every individual flagged frame, so a
+        # single problem segment doesn't flood the output with hundreds of
+        # near-duplicate lines.
+        run_starts = [low_manip_idxes[0]]
+        run_ends = []
+        for i in range(1, len(low_manip_idxes)):
+            if low_manip_idxes[i] != low_manip_idxes[i - 1] + 1:
+                run_ends.append(low_manip_idxes[i - 1])
+                run_starts.append(low_manip_idxes[i])
+        run_ends.append(low_manip_idxes[-1])
+        print(
+            "[CheckUmiFairino5Reachability] Low-manipulability segment(s) -- "
+            "expect the real arm to lag/overshoot the Vive-driven target here "
+            "even with a high --time_scale in ReplayUmiOnFairino5.py, since "
+            "this is a geometric (Jacobian conditioning) issue, not just a "
+            "recorded-speed issue:"
+        )
+        for start, end in zip(run_starts, run_ends):
+            print(
+                f"  t={time_seq[start] - time_seq[0]:.2f}-"
+                f"{time_seq[end] - time_seq[0]:.2f}s (steps {start}-{end}), "
+                f"min singular value={min_singular_value_log[start:end + 1].min():.3f}"
+            )
     print(
         "[CheckUmiFairino5Reachability] Per-joint range used vs. limit [deg]:"
     )

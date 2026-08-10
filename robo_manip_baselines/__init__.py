@@ -20,5 +20,15 @@ if _platform.system() == "Linux":
             # Headless system without X libraries; cv2 GUI would not work anyway.
             pass
 
+# NOTE: an earlier version of this file also cleared QT_QPA_PLATFORM_PLUGIN_PATH
+# here (which cv2's own __init__ sets to its bundled cv2/qt/plugins dir) to fix
+# misc/VisualizeData.py's matplotlib Qt window, whose bundled xcb plugin fails
+# to load once the preload above shadows cv2's own bundled libxcb with the
+# system one. But doing that process-wide broke teleop/TeleopBase.py's
+# cv2.imshow camera-preview window, which needs QT_QPA_PLATFORM_PLUGIN_PATH
+# still pointed at cv2's own plugins to find a working xcb plugin at all. So
+# that fix now lives locally in misc/VisualizeData.py instead (see the comment
+# there), where only matplotlib's Qt window is at stake, not cv2.imshow.
+
 from .version import __version__
 from . import envs

@@ -42,6 +42,26 @@ class ViveInputDevice(InputDeviceBase):
     POSE_SETTLE_POS_TOLERANCE = 0.02  # [m]
     POSE_SETTLE_ROT_TOLERANCE = np.deg2rad(5.0)  # [rad]
 
+    # Minimum time since the tracker was FIRST seen (independent of the
+    # settle-window check above) before anchoring is allowed at all.
+    # misc/MeasureViveDrift.py measured a stationary tracker's raw pose
+    # directly: position climbed ~2cm and orientation ~7deg over the first
+    # ~5-10s after acquisition (visible in libsurvive's own log as
+    # successive "Global solve with N scenes" refinements -- i.e. the
+    # multi-lighthouse pose solver is still actively converging, not just
+    # settling from tracker motion), then stayed flat within ~1-2mm/~1deg
+    # noise for the rest of a 60s hold. POSE_SETTLE_POS_TOLERANCE/
+    # POSE_SETTLE_ROT_TOLERANCE (2cm/5deg) are comparable in size to that
+    # ENTIRE convergence transient, so the settle-window check above can
+    # (and in practice does) lock in an anchor pose mid-convergence, any
+    # time the instantaneous rate of change dips below tolerance for
+    # POSE_SETTLE_TIME even though the solver hasn't finished refining --
+    # confirmed to be the root cause of a UMI recording that appeared to
+    # "drift" ~5cm/~5.7deg over its own first 10.5s despite the tracker
+    # never having been intentionally moved. This is a hard floor
+    # independent of that check, with margin above the ~5-10s observed.
+    MIN_ANCHOR_DELAY = 10.0  # [s]
+
     # A single libsurvive context talks to all USB-connected lighthouses/trackers,
     # so it must be created once and shared across all ViveInputDevice instances
     # (e.g. the two trackers of a dual-arm setup) rather than once per instance.
@@ -123,6 +143,7 @@ class ViveInputDevice(InputDeviceBase):
         self._last_update_wall_time = None
         self._settle_start_se3 = None
         self._settle_start_wall_time = None
+        self._first_tracked_wall_time = None
 
         if self.connected:
             return
@@ -200,6 +221,7 @@ class ViveInputDevice(InputDeviceBase):
             self.has_announced_ready = False
             self._settle_start_se3 = None
             self._settle_start_wall_time = None
+            self._first_tracked_wall_time = None
             return
 
         # Vive Trackers have no trigger to gate teleop on, so enable teleop as soon
@@ -208,6 +230,8 @@ class ViveInputDevice(InputDeviceBase):
         if not self.enabled_teleop:
             current_se3 = self.state["se3"]
             now = time.time()
+            if self._first_tracked_wall_time is None:
+                self._first_tracked_wall_time = now
             if self._settle_start_se3 is None:
                 self._settle_start_se3 = current_se3.copy()
                 self._settle_start_wall_time = now
@@ -226,7 +250,11 @@ class ViveInputDevice(InputDeviceBase):
                     # window from this new pose.
                     self._settle_start_se3 = current_se3.copy()
                     self._settle_start_wall_time = now
-                elif (now - self._settle_start_wall_time) >= self.POSE_SETTLE_TIME:
+                elif (
+                    (now - self._settle_start_wall_time) >= self.POSE_SETTLE_TIME
+                    and (now - self._first_tracked_wall_time)
+                    >= self.MIN_ANCHOR_DELAY
+                ):
                     self.enabled_teleop = True
                     self.vive_se3_at_enable = current_se3.copy()
                     self.eef_se3_at_enable = self.arm_manager.current_se3.copy()
