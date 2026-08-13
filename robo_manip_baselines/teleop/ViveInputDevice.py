@@ -106,11 +106,13 @@ class ViveInputDevice(InputDeviceBase):
                 vive_to_eef_frame_rotation, dtype=np.float64
             )
         assert self.vive_to_eef_frame_rotation.shape == (3, 3)
-        # Rotates a raw Vive-room-frame *translation* delta into the robot's base
-        # frame -- see set_command_data(). This is a fixed physical relationship
-        # between the lighthouses and the robot base (not how the tracker is
-        # held), so unlike vive_to_eef_frame_rotation it does not need
-        # recalibrating each session. Calibrate with calibrate_vive_world_frame.py.
+        # No longer used by set_command_data(): translation is now computed
+        # TCP-locally (via vive_to_eef_frame_rotation, same as rotation) instead of
+        # as a room-to-base-frame absolute delta, so a room<->base calibration is no
+        # longer needed for translation. Kept as an accepted (but unused) constructor
+        # kwarg only so existing configs (Vive.yaml/ViveDual.yaml/ViveUMI.yaml) that
+        # still set this key don't fail to load; harmless to leave unset going
+        # forward.
         if vive_world_to_base_frame_rotation is None:
             self.vive_world_to_base_frame_rotation = np.eye(3)
         else:
@@ -144,6 +146,12 @@ class ViveInputDevice(InputDeviceBase):
         self._settle_start_se3 = None
         self._settle_start_wall_time = None
         self._first_tracked_wall_time = None
+        # Room-frame tracker position as of the *previous* frame, used to compute
+        # this frame's incremental translation delta in set_command_data(). Reset
+        # here and re-anchored (alongside vive_se3_at_enable) whenever teleop
+        # (re-)enables, so a tracking dropout can't leave a stale reference that
+        # would otherwise show up as one large spurious jump on the next frame.
+        self._prev_vive_translation = None
 
         if self.connected:
             return
@@ -222,6 +230,7 @@ class ViveInputDevice(InputDeviceBase):
             self._settle_start_se3 = None
             self._settle_start_wall_time = None
             self._first_tracked_wall_time = None
+            self._prev_vive_translation = None
             return
 
         # Vive Trackers have no trigger to gate teleop on, so enable teleop as soon
@@ -258,6 +267,7 @@ class ViveInputDevice(InputDeviceBase):
                     self.enabled_teleop = True
                     self.vive_se3_at_enable = current_se3.copy()
                     self.eef_se3_at_enable = self.arm_manager.current_se3.copy()
+                    self._prev_vive_translation = current_se3.translation.copy()
                     print(
                         f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}'."
                     )
@@ -318,23 +328,12 @@ class ViveInputDevice(InputDeviceBase):
 
         # Set arm command.
         #
-        # Translation is computed directly in the robot's base frame: the raw
-        # Vive-room-frame position delta (independent of how the tracker happens
-        # to be oriented/held) is rotated into base frame and added straight onto
-        # the EEF's enable-time base-frame position. This keeps "move the tracker
-        # forward" meaning "move the tool forward relative to the body" even if
-        # the tool itself is tilted, instead of tracking the tool's own (possibly
-        # tilted) local frame.
-        raw_translation_delta = (
-            self.state["se3"].translation - self.vive_se3_at_enable.translation
-        )
-        target_translation = self.eef_se3_at_enable.translation + self.pos_scale * (
-            self.vive_world_to_base_frame_rotation @ raw_translation_delta
-        )
-
-        # Rotation still tracks the tool's own local frame: a tracker rotation
-        # delta (relative to how it was held at enable time) is applied as an
-        # EEF-local rotation delta relative to the tool's enable-time orientation.
+        # Rotation tracks the tool's own local frame, and is path-independent (SO(3)
+        # composition only depends on start/end orientation, not the path taken in
+        # between) so it's computed as a single closed-form delta from enable time:
+        # a tracker rotation delta (relative to how it was held at enable time) is
+        # applied as an EEF-local rotation delta relative to the tool's enable-time
+        # orientation.
         delta_vive_rotation = (
             self.vive_se3_at_enable.rotation.T @ self.state["se3"].rotation
         )
@@ -344,6 +343,36 @@ class ViveInputDevice(InputDeviceBase):
             @ self.vive_to_eef_frame_rotation.T
         )
         target_rotation = self.eef_se3_at_enable.rotation @ adjusted_rotation_delta
+
+        # Translation follows the tool's own local frame too (so "push the tracker
+        # forward" always means "push the TCP forward along its own current Z", even
+        # while simultaneously rotating -- holonomic-style combined motion). Unlike
+        # rotation, this is genuinely path-dependent (moving forward while turning
+        # traces a curve, not a straight line -- there's no single start/end-only
+        # formula for it, same as a robot integrating body-frame velocity commands).
+        # So instead of one big delta from enable time, we accumulate a fresh
+        # incremental delta every frame: this frame's tiny room-frame motion,
+        # reinterpreted through *this frame's* tracker/TCP orientation, added onto
+        # the running target position (self.arm_manager.target_se3, not a snapshot).
+        #
+        # This does not IMU-style dead-reckoning drift: state["se3"] comes from
+        # libsurvive's lighthouse-anchored pose solve, an absolute measurement each
+        # frame (not itself an integrated/drifting quantity), so accumulated error
+        # here is bounded by that measurement's noise, not an unbounded bias.
+        raw_translation_delta_incremental = (
+            self.state["se3"].translation - self._prev_vive_translation
+        )
+        translation_delta_tracker_local = (
+            self.state["se3"].rotation.T @ raw_translation_delta_incremental
+        )
+        translation_delta_eef_local = (
+            self.vive_to_eef_frame_rotation @ translation_delta_tracker_local
+        )
+        self._prev_vive_translation = self.state["se3"].translation.copy()
+
+        target_translation = self.arm_manager.target_se3.translation + self.pos_scale * (
+            target_rotation @ translation_delta_eef_local
+        )
 
         target_se3 = pin.SE3(target_rotation, target_translation)
 

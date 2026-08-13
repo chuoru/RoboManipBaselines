@@ -61,7 +61,11 @@ mt-act = [
 ]
 diffusion-policy = [
   "cffi",
-  "zarr>=2.12.0",
+  # third_party/diffusion_policy (and misc/ConvertRmbDataToUmiZarr.py, which
+  # reuses its ReplayBuffer) use zarr's v2 API (zarr.DirectoryStore,
+  # zarr.MemoryStore(), etc.), which zarr 3.x removed/renamed -- unbounded
+  # >=2.12.0 lets `pip install` pick up zarr 3.x and break at import time.
+  "zarr>=2.12.0,<3",
   "numcodecs",
   "hydra-core",
   "einops",

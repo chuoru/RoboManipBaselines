@@ -3,7 +3,7 @@
 # `python ./teleop/check_vive_devices.py` to find your tracker's serial.
 device_params:
   name: primary
-  serial_number: LHR-904A2704
+  serial_number: LHR-208C8961
 # pos_scale and the rotation matrices below are copied as-is from ViveDual.yaml's
 # left-arm (index 0) calibration, as a starting point only. The dual rig's left/right
 # arms are mounted facing each other, so a single-arm mount will generally have a
@@ -12,10 +12,10 @@ device_params:
 # trusting the motion directions.
 pos_scale: 0.9
 vive_to_eef_frame_rotation:
-  - [-0.017408, -0.038467, -0.999108]
-  - [-0.998416, 0.054132, 0.015312]
-  - [0.053495, 0.997793, -0.039348]
+  - [-0.994961, 0.025321, 0.097010]
+  - [0.098177, 0.049841, 0.993920]
+  - [0.020332, 0.998436, -0.052076]
 vive_world_to_base_frame_rotation:
-  - [0.234888, -0.889556, -0.391813]
-  - [0.166570, -0.360291, 0.917848]
-  - [-0.957644, -0.280856, 0.063545]
+  - [-0.252292, -0.966132, -0.054211]
+  - [0.965930, -0.248107, -0.073632]
+  - [0.057688, -0.070940, 0.995811]

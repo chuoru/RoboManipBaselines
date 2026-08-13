@@ -4,6 +4,7 @@
   <asset>
     <texture name="pole" file="general/metal2.png" type="cube"/>
     <material name="pole" texture="pole" rgba="0.8 0 0 1" specular="1.0" shininess="1.0"/>
+    <material name="grasp_cylinder" rgba="0.9 0.5 0.05 1" specular="0.3" shininess="0.2"/>
   </asset>
 
   <include file="../../robots/fairino5_v6/fairino5_v6_config.xml"/>
@@ -49,6 +50,44 @@
     <body name="poles" pos="-0.1 0.1 0.795">
       <geom name="pole1" type="cylinder" size="0.01 0.03" pos="0.0 0.0 0.05" material="pole"/>
       <geom name="pole2" type="cylinder" size="0.01 0.03" pos="0.05 0.0 0.05" material="pole"/>
+    </body>
+
+    <!-- Cylinder with a ring/handle on top, easy for the parallel gripper to
+         hook/pinch (MuJoCo has no torus primitive, so the ring is approximated
+         with 16 capsule segments arranged in a circle -- radius 0.025m,
+         tube radius 0.005m, comparable thickness to the cable so the fingers
+         can close around it). The ring stands on a short stem above the
+         cylinder, in the Y-Z plane (hole facing +-X) so a gripper reaching
+         horizontally along X can pass its fingers through the hole and close
+         on the ring's near/far tube sides (separated along Y, the gripper's
+         finger-open/close axis -- see teleop discussion on the "pinch" site's
+         local-Y reach convention). All geoms share one body/freejoint since
+         it's a single rigid object.
+         Table top z=0.815, center x=0 y=0 (table body has no offset from
+         world origin; table half-extent in x is 0.275). Body origin is
+         positioned 20cm further from the robot base (base at x=-0.605) than
+         table center, i.e. toward the table's far/deep side, leaving a 7.5cm
+         margin to the table edge. -->
+    <body name="grasp_ring" pos="0.2 0 0.845">
+      <freejoint/>
+      <geom name="grasp_cylinder" type="cylinder" size="0.02 0.03" material="grasp_cylinder" mass="0.05" friction="1.0 0.005 0.0001"/>
+      <geom type="cylinder" size="0.006 0.01" pos="0 0 0.04" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.00000 0.10000 0.00000 0.00957 0.09810" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.00957 0.09810 0.00000 0.01768 0.09268" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.01768 0.09268 0.00000 0.02310 0.08457" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.02310 0.08457 0.00000 0.02500 0.07500" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.02500 0.07500 0.00000 0.02310 0.06543" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.02310 0.06543 0.00000 0.01768 0.05732" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.01768 0.05732 0.00000 0.00957 0.05190" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.00957 0.05190 0.00000 0.00000 0.05000" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 0.00000 0.05000 0.00000 -0.00957 0.05190" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.00957 0.05190 0.00000 -0.01768 0.05732" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.01768 0.05732 0.00000 -0.02310 0.06543" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.02310 0.06543 0.00000 -0.02500 0.07500" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.02500 0.07500 0.00000 -0.02310 0.08457" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.02310 0.08457 0.00000 -0.01768 0.09268" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.01768 0.09268 0.00000 -0.00957 0.09810" material="grasp_cylinder"/>
+      <geom type="capsule" size="0.005" fromto="0.00000 -0.00957 0.09810 0.00000 0.00000 0.10000" material="grasp_cylinder"/>
     </body>
   </worldbody>
 
