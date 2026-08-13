@@ -17,18 +17,39 @@ class MujocoFairino5CableEnv(MujocoFairino5EnvBase):
                 path.dirname(__file__),
                 "../../assets/mujoco/envs/fairino/env_fairino_cable.xml",
             ),
-            # Arm joints tuned so the gripper's "pinch" site hovers directly above
-            # the cable/poles area, pointing straight down (verified via forward
-            # kinematics against env_fairino_cable.xml, with a safety margin from
-            # each joint's range limit and zero self/table collisions at rest).
+            # Arm joints tuned (numerically, against real MuJoCo collision geometry
+            # -- see misc/ for the search script) so the gripper's "pinch" site:
+            #  - sits ~10cm above the table top (table top z=0.815 in env_fairino_
+            #    cable.xml -> pinch z=0.915)
+            #  - is oriented parallel to the table (reaching horizontally, not
+            #    pointing down), facing straight forward along the base's +X axis
+            #    (no yaw). NOTE: the "pinch" site's reach direction is its local
+            #    *Y* axis, not Z -- confirmed both by the site's body-fixed offset
+            #    (pos="0 0.0895 0.0023" in fairino5_v6_body.xml, overwhelmingly
+            #    along Y) and by rendering -- an earlier attempt that leveled the
+            #    local Z axis instead visibly pointed the gripper straight down.
+            #  - joint1 (shoulder yaw) is ~90deg away from an earlier candidate
+            #    that reached the same region with joint3 (elbow) only ~3deg from
+            #    its limit; this posture instead keeps every joint at least
+            #    ~30deg from its limit (joint4 the tightest, ~6deg), leaving
+            #    headroom to actually extend the arm further across the table
+            #    during teleop instead of starting near-maxed-out.
+            #  - has zero interpenetration with the table, itself, the cable, and
+            #    the poles at rest (previously the class default of contype=0/
+            #    conaffinity=0 on all robot meshes hid this entirely -- with
+            #    collision enabled, the old pose -- which, despite its "pointing
+            #    straight down" description, actually already reached
+            #    horizontally over the table -- had the forearm buried up to
+            #    22.7cm into the table)
+            # This sits ~12cm away (in the table plane) from the table's center.
             np.array(
                 [
-                    0.717790623,
-                    -2.78977928,
-                    -1.54923309,
-                    1.12542532,
-                    -0.828260266,
-                    0.0,
+                    7.631944889126715e-05,
+                    -2.4288940584970162,
+                    -2.163997949351957,
+                    1.3792951116167333,
+                    1.570720007328029,
+                    3.238504968409533e-10,
                     *np.zeros(2),
                 ]
             ),

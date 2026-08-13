@@ -31,7 +31,7 @@
   <default>
     <default class="fairino5_v6">
       <joint axis="0 0 1" actuatorgravcomp="true"/>
-      <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+      <geom type="mesh" contype="1" conaffinity="1" group="2"/>
       <general biastype="affine"/>
       <default class="gripper">
         <joint type="slide" limited="true" range="-0.015 0.015" armature="0.001" damping="0.2" actuatorgravcomp="true" actuatorfrclimited="false"/>
@@ -41,6 +41,16 @@
 
   <contact>
     <exclude body1="base_link" body2="shoulder_link"/>
+    <!-- Adjacent links share a joint axis, so their meshes overlap right at the
+         joint in the resting CAD pose -- collision must be excluded between each
+         directly-connected pair (mirrors base_link/shoulder_link above), or the
+         solver sees permanent self-penetration the moment contype/conaffinity
+         make the pair collidable. -->
+    <exclude body1="shoulder_link" body2="upperarm_link"/>
+    <exclude body1="upperarm_link" body2="forearm_link"/>
+    <exclude body1="forearm_link" body2="wrist1_link"/>
+    <exclude body1="wrist1_link" body2="wrist2_link"/>
+    <exclude body1="wrist2_link" body2="wrist3_link"/>
     <pair geom1="right_side" geom2="right_pinch"/>
     <pair geom1="left_side" geom2="left_pinch"/>
     <exclude body1="gripper_base" body2="right_pinch_link"/>
