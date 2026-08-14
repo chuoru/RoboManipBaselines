@@ -68,7 +68,13 @@
     <general class="fairino5_v6" name="act4" joint="joint4" ctrlrange="-4.6251 1.4835" gainprm="160" biasprm="0 -160 -35"/>
     <general class="fairino5_v6" name="act5" joint="joint5" ctrlrange="-3.0543 3.0543" gainprm="140" biasprm="0 -140 -30"/>
     <general class="fairino5_v6" name="act6" joint="joint6" ctrlrange="-3.0543 3.0543" gainprm="140" biasprm="0 -140 -30"/>
-    <general class="fairino5_v6" name="gripper_actuator" joint="right_pinch" ctrllimited="true" ctrlrange="-0.015 0.015" gainprm="5" biasprm="0 -5"/>
+    <!-- biasprm's 3rd term (kv) was missing here -- every other actuator above
+         has one (~0.2x its gain, for velocity damping), but this one was a
+         pure spring (kp only). With no damping term, contact against a stiff
+         object (e.g. push_block) had nothing to dissipate the resulting
+         motion, so the joint rang/oscillated between its limits instead of
+         settling. kv=-1 follows the same ~0.2x-gain ratio used elsewhere. -->
+    <general class="fairino5_v6" name="gripper_actuator" joint="right_pinch" ctrllimited="true" ctrlrange="-0.015 0.015" gainprm="5" biasprm="0 -5 -1"/>
   </actuator>
 
   <sensor>

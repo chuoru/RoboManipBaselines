@@ -2,14 +2,11 @@
   <include file="./env_fairino_common.xml"/>
 
   <asset>
-    <texture name="pole" file="general/metal2.png" type="cube"/>
-    <material name="pole" texture="pole" rgba="0.8 0 0 1" specular="1.0" shininess="1.0"/>
-    <material name="grasp_cylinder" rgba="0.9 0.5 0.05 1" specular="0.3" shininess="0.2"/>
+    <material name="push_block" rgba="0.9 0.5 0.05 1" specular="0.3" shininess="0.2"/>
+    <material name="goal_marker" rgba="0.95 0.85 0.1 1" specular="0.0" shininess="0.0" emission="0.3"/>
   </asset>
 
   <include file="../../robots/fairino5_v6/fairino5_v6_config.xml"/>
-
-  <include file="../../objects/cable/cable_config.xml"/>
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true" diffuse="0.3 0.3 0.3"/>
@@ -38,66 +35,34 @@
       <include file="../../robots/fairino5_v6/fairino5_v6_body.xml"/>
     </body>
 
-    <body name="cable" pos="-0.175 0.2 0.8325" quat="0.707105 0 0 -0.707108">
-      <include file="../../objects/cable/cable_body.xml"/>
+    <!-- Goal region: a taped-off 12x12cm square outline, for "push the
+         object inside this rectangle" tasks. Positioned ~28cm from
+         push_block (x=0.12 y=0.08) along -Y, close enough for a deliberate
+         push rather than a long traverse. Purely a visual marking --
+         contype/conaffinity=0 so it never collides with anything, like real
+         tape wouldn't. Four thin box strips forming a square, each spanning
+         the full side length so the corners overlap. -->
+    <body name="goal_region" pos="0.12 -0.12 0.8155">
+      <geom type="box" size="0.06 0.004 0.0005" pos="0 0.06 0" contype="0" conaffinity="0" material="goal_marker"/>
+      <geom type="box" size="0.06 0.004 0.0005" pos="0 -0.06 0" contype="0" conaffinity="0" material="goal_marker"/>
+      <geom type="box" size="0.004 0.06 0.0005" pos="0.06 0 0" contype="0" conaffinity="0" material="goal_marker"/>
+      <geom type="box" size="0.004 0.06 0.0005" pos="-0.06 0 0" contype="0" conaffinity="0" material="goal_marker"/>
     </body>
 
-    <body name="cable_end" pos="-0.175 -0.28 0.8325" euler="0 0 -1.5708">
-      <freejoint/>
-      <geom type="box" size="0.02 0.015 0.015" pos="0.0 0.0 0.0" material="cable_box"/>
-    </body>
-
-    <body name="poles" pos="-0.1 0.1 0.795">
-      <geom name="pole1" type="cylinder" size="0.01 0.03" pos="0.0 0.0 0.05" material="pole"/>
-      <geom name="pole2" type="cylinder" size="0.01 0.03" pos="0.05 0.0 0.05" material="pole"/>
-    </body>
-
-    <!-- Cylinder with a ring/handle on top, easy for the parallel gripper to
-         hook/pinch (MuJoCo has no torus primitive, so the ring is approximated
-         with 16 capsule segments arranged in a circle -- radius 0.025m,
-         tube radius 0.005m, comparable thickness to the cable so the fingers
-         can close around it). The ring stands on a short stem above the
-         cylinder, in the Y-Z plane (hole facing +-X) so a gripper reaching
-         horizontally along X can pass its fingers through the hole and close
-         on the ring's near/far tube sides (separated along Y, the gripper's
-         finger-open/close axis -- see teleop discussion on the "pinch" site's
-         local-Y reach convention). All geoms share one body/freejoint since
-         it's a single rigid object.
-         Table top z=0.815, center x=0 y=0 (table body has no offset from
-         world origin; table half-extent in x is 0.275). Body origin is
-         positioned 20cm further from the robot base (base at x=-0.605) than
-         table center, i.e. toward the table's far/deep side, leaving a 7.5cm
-         margin to the table edge. -->
-    <body name="grasp_ring" pos="0.2 0 0.845">
-      <freejoint/>
-      <geom name="grasp_cylinder" type="cylinder" size="0.02 0.03" material="grasp_cylinder" mass="0.05" friction="1.0 0.005 0.0001"/>
-      <geom type="cylinder" size="0.006 0.01" pos="0 0 0.04" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.00000 0.10000 0.00000 0.00957 0.09810" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.00957 0.09810 0.00000 0.01768 0.09268" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.01768 0.09268 0.00000 0.02310 0.08457" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.02310 0.08457 0.00000 0.02500 0.07500" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.02500 0.07500 0.00000 0.02310 0.06543" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.02310 0.06543 0.00000 0.01768 0.05732" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.01768 0.05732 0.00000 0.00957 0.05190" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.00957 0.05190 0.00000 0.00000 0.05000" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 0.00000 0.05000 0.00000 -0.00957 0.05190" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.00957 0.05190 0.00000 -0.01768 0.05732" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.01768 0.05732 0.00000 -0.02310 0.06543" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.02310 0.06543 0.00000 -0.02500 0.07500" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.02500 0.07500 0.00000 -0.02310 0.08457" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.02310 0.08457 0.00000 -0.01768 0.09268" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.01768 0.09268 0.00000 -0.00957 0.09810" material="grasp_cylinder"/>
-      <geom type="capsule" size="0.005" fromto="0.00000 -0.00957 0.09810 0.00000 0.00000 0.10000" material="grasp_cylinder"/>
+    <!-- Push block: a simple 6cm cube to push (not grasp) into goal_region.
+         Rests flat on the table (table top z=0.815 -> body z=0.815+0.03),
+         positioned close to the arm's reach, ~28cm from goal_region so a
+         deliberate push has some distance to cover but isn't a long
+         traverse. condim=6/solref/solimp/joint damping carried over from the
+         earlier grasp_ring object -- same reasoning applies (torsional/
+         rolling friction components need condim>=4 to do anything at all,
+         and the softer default contact impedance caused visible jitter for
+         small/light free bodies when disturbed). Friction is high (like the
+         earlier object) so a push translates the block cleanly instead of
+         it skating around unpredictably under the gripper. -->
+    <body name="push_block" pos="0.12 0.08 0.845">
+      <joint name="push_block" type="free" damping="0.5"/>
+      <geom name="push_block" type="box" size="0.03 0.03 0.03" material="push_block" mass="0.08" friction="1.4 0.5 0.05" condim="6" solref="0.004 1" solimp="0.9 0.95 0.001"/>
     </body>
   </worldbody>
-
-  <equality>
-    <weld name="cable_end" body1="cable_B24" body2="cable_end" relpose="0 0 0 1 0 0 0"/>
-  </equality>
-
-  <contact>
-    <exclude body1="cable_B0" body2="cable_B1"/>
-    <exclude body1="cable_B23" body2="cable_end"/>
-    <exclude body1="cable_B24" body2="cable_end"/>
-  </contact>
 </mujoco>

@@ -161,7 +161,25 @@ class ViveInputDevice(InputDeviceBase):
                 import pysurvive
 
                 ViveInputDevice._pysurvive = pysurvive
-                ViveInputDevice._shared_context = pysurvive.SimpleContext([])
+                # Force the BaryCentricSVD poser instead of libsurvive's
+                # default (MPFIT) for per-object pose fitting, and disable
+                # the separate lighthouse-position calibration solve (which
+                # *always* runs through GlobalSceneSolver's own internal
+                # MPFIT-based optimizer, regardless of "-p" -- confirmed by
+                # "MPFIT success"/"Global solve" log lines still appearing
+                # even with the poser above forced to BaryCentricSVD).
+                # Windows Event Log repeatedly showed a native stack overflow
+                # (0xc00000fd) inside libsurvive.dll/poser_mpfit.dll at the
+                # exact same offset during long teleop recording sessions;
+                # an isolated 5-minute continuous-tracking stress test only
+                # stopped reproducing it once calibration was disabled here.
+                # This relies on a valid calibration already being cached in
+                # ~/.config/libsurvive/config.json (run once with calibration
+                # enabled -- or via calibrate_vive_rotation.py -- to produce
+                # it) since --disable-calibrate skips solving it fresh.
+                ViveInputDevice._shared_context = pysurvive.SimpleContext(
+                    ["-p", "PoserBaryCentricSVD", "--disable-calibrate", "1"]
+                )
             ViveInputDevice._shared_context_refcount += 1
         self.pysurvive = ViveInputDevice._pysurvive
         self.ctx = ViveInputDevice._shared_context
