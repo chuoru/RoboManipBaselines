@@ -55,6 +55,17 @@ services:
     container_name: robo_manip_baselines
     stdin_open: true
     tty: true
+    # Docker's default /dev/shm is 64MB, which training cannot work with:
+    # a DataLoader with num_workers>0 hands every batch to the main process
+    # through shared memory, and one image batch alone is far bigger than
+    # that -- 64 (batch) x 2 (obs steps) x 3ch x 240x320 x 4B = 118MB, and
+    # prefetch_factor=4 across 4 workers keeps up to ~1.9GB in flight. Below
+    # this, training dies on the first batch with
+    #   RuntimeError: unable to allocate shared memory (shm) for file ...
+    # The workaround is --num_workers 0 (single-process loading, no shm at
+    # all), but that serializes data loading and measurably slows training,
+    # so give the container room instead.
+    shm_size: '16gb'
     working_dir: /workspace/RoboManipBaselines/robo_manip_baselines
     environment:
       - DISPLAY=${DISPLAY}
