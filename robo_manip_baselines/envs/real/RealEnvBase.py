@@ -27,6 +27,10 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         self.init_time = time.time()
         self.dt = 0.02  # [s]
         self.world_random_scale = None
+        # Anchor for the velocity clamp in overwrite_command_for_safety. None
+        # means "no command issued since the last reset", in which case the
+        # clamp anchors on the measured position for that first command.
+        self._prev_arm_joint_pos_command = None
 
         # Setup device variables
         self.cameras = {}
@@ -310,6 +314,14 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
         self._reset_robot()
 
+        # Drop the velocity clamp's anchor so the first command of the new
+        # episode re-anchors on the arm's true position instead of a stale
+        # command from the previous one (see overwrite_command_for_safety).
+        # Done centrally so every Real*EnvBase gets it; subclasses that move
+        # the arm OUTSIDE reset() (e.g. RealFairino5EnvBase.move_to_init_pose)
+        # must clear it themselves as well.
+        self._prev_arm_joint_pos_command = None
+
         observation = self._get_obs()
         info = self._get_info()
 
@@ -356,6 +368,12 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
     def _set_action(self):
         pass
 
+    # How far the commanded joint position may run ahead of the measured one
+    # before overwrite_command_for_safety warns. Generous enough not to fire
+    # on normal servo lag, small enough to catch an arm that has actually
+    # stopped following.
+    joint_pos_tracking_error_warn_threshold = np.deg2rad(15.0)  # [rad]
+
     def overwrite_command_for_safety(self, action, duration, joint_vel_limit_scale):
         arm_joint_idxes = np.concatenate(
             [
@@ -395,13 +413,66 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             # than rejected outright, so a single noisy/singular command doesn't
             # crash the teleop session -- the velocity clamp is what actually
             # keeps the physical motion safe.
-            arm_joint_pos_command_overwritten = self.arm_joint_pos_actual + np.clip(
-                arm_joint_pos_command - self.arm_joint_pos_actual,
-                -1 * scaled_joint_vel_limit * duration,
-                scaled_joint_vel_limit * duration,
+            #
+            # The clamp is anchored on the PREVIOUS COMMAND, not on the
+            # measured position. That distinction is the whole point: for a
+            # stream of position commands to a servo, "velocity limit" means
+            # how fast the COMMAND may move, and anchoring on the measurement
+            # instead turns the robot's own tracking error into a throttle on
+            # the command:
+            #   sent = measured + clip(command - measured, +/-limit)
+            # Once the arm falls even slightly behind, `command - measured`
+            # exceeds the limit, so `sent` is pinned just ahead of where the
+            # arm already is; the arm can never catch up, and the commanded
+            # motion is silently attenuated instead of merely rate-limited.
+            # Measured on the real FR5 replaying a UMI demo: the clamp fired
+            # on 47% of steps and crushed commanded joint ranges from 105/94/90
+            # deg (J4/J6/J5) down to 29/24/41 deg -- the arm tracked what it
+            # was sent essentially perfectly, but what it was sent was wrong.
+            # The visible symptom was a recorded roll rotation not happening
+            # at all. MuJoCo never showed this because MujocoEnvBase.step()
+            # passes the action straight to do_simulation() with no clamp.
+            #
+            # Anchoring on the previous command keeps the real guarantee
+            # (successive commands never step more than the limit, so nothing
+            # commands a jump) without coupling the command stream to tracking
+            # error. Tracking error is still watched, but reported rather than
+            # silently compensated -- see the warning below.
+            if self._prev_arm_joint_pos_command is None:
+                # First command after a reset: anchor on where the arm
+                # actually is, so it cannot jump from an unknown state.
+                self._prev_arm_joint_pos_command = self.arm_joint_pos_actual.copy()
+
+            max_joint_pos_delta = scaled_joint_vel_limit * duration
+            arm_joint_pos_command_overwritten = (
+                self._prev_arm_joint_pos_command
+                + np.clip(
+                    arm_joint_pos_command - self._prev_arm_joint_pos_command,
+                    -1 * max_joint_pos_delta,
+                    max_joint_pos_delta,
+                )
             )
-            # if np.linalg.norm(arm_joint_pos_command_overwritten - arm_joint_pos_command) > 1e-10:
-            #     print(f"[{self.__class__.__name__}] Overwrite joint command for safety.")
+            self._prev_arm_joint_pos_command = arm_joint_pos_command_overwritten.copy()
+
+            # An open-loop command stream can outrun the arm without the
+            # clamp noticing, so surface it here instead. This is a real
+            # fault condition (a stalled/blocked/faulted arm, or commands
+            # simply too fast for it), and it used to be hidden by the
+            # measured-anchored clamp quietly throttling the command.
+            tracking_error = np.max(
+                np.abs(
+                    arm_joint_pos_command_overwritten - self.arm_joint_pos_actual
+                )
+            )
+            if tracking_error > self.joint_pos_tracking_error_warn_threshold:
+                print(
+                    f"[{self.__class__.__name__}] WARNING: commanded joint "
+                    f"position is {np.rad2deg(tracking_error):.1f} deg ahead of "
+                    "the measured position -- the arm is not keeping up with "
+                    "the command stream (slow it down, e.g. "
+                    "ReplayUmiOnFairino5.py's --time_scale)."
+                )
+
             action[arm_joint_idxes] = arm_joint_pos_command_overwritten
 
         if not np.all(np.isfinite(action)):

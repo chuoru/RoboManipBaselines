@@ -3,6 +3,7 @@ from os import path
 import mujoco
 import numpy as np
 
+from ...real.fairino5.RealFairino5DemoEnv import RealFairino5DemoEnv
 from .MujocoFairino5EnvBase import MujocoFairino5EnvBase
 
 
@@ -17,41 +18,30 @@ class MujocoFairino5CableEnv(MujocoFairino5EnvBase):
                 path.dirname(__file__),
                 "../../assets/mujoco/envs/fairino/env_fairino_cable.xml",
             ),
-            # Arm joints tuned (numerically, against real MuJoCo collision geometry
-            # -- see misc/ for the search script) so the gripper's "pinch" site:
-            #  - sits ~10cm above the table top (table top z=0.815 in env_fairino_
-            #    cable.xml -> pinch z=0.915)
-            #  - is oriented parallel to the table (reaching horizontally, not
-            #    pointing down), facing straight forward along the base's +X axis
-            #    (no yaw). NOTE: the "pinch" site's reach direction is its local
-            #    *Y* axis, not Z -- confirmed both by the site's body-fixed offset
-            #    (pos="0 0.0895 0.0023" in fairino5_v6_body.xml, overwhelmingly
-            #    along Y) and by rendering -- an earlier attempt that leveled the
-            #    local Z axis instead visibly pointed the gripper straight down.
-            #  - joint1 (shoulder yaw) is ~90deg away from an earlier candidate
-            #    that reached the same region with joint3 (elbow) only ~3deg from
-            #    its limit; this posture instead keeps every joint at least
-            #    ~30deg from its limit (joint4 the tightest, ~6deg), leaving
-            #    headroom to actually extend the arm further across the table
-            #    during teleop instead of starting near-maxed-out.
-            #  - has zero interpenetration with the table, itself, the cable, and
-            #    the poles at rest (previously the class default of contype=0/
-            #    conaffinity=0 on all robot meshes hid this entirely -- with
-            #    collision enabled, the old pose -- which, despite its "pointing
-            #    straight down" description, actually already reached
-            #    horizontally over the table -- had the forearm buried up to
-            #    22.7cm into the table)
-            # This sits ~12cm away (in the table plane) from the table's center.
-            np.array(
-                [
-                    7.631944889126715e-05,
-                    -2.4288940584970162,
-                    -2.163997949351957,
-                    1.3792951116167333,
-                    1.570720007328029,
-                    3.238504968409533e-10,
-                    *np.zeros(2),
-                ]
+            # Start from the SAME joint configuration the real arm starts
+            # from (RealFairino5DemoEnv.READY_POSE_DEG), so this env is a
+            # usable dry run for the real one.
+            #
+            # This matters because UMI replay (misc/ReplayUmiOnFairino5.py)
+            # and its offline reachability check
+            # (misc/CheckUmiFairino5Reachability.py) both retarget a recorded
+            # demo as motion RELATIVE to the arm's initial pose. A different
+            # starting configuration therefore sweeps a completely different
+            # region of the workspace: with this env's previous, MuJoCo-only
+            # posture a demo replayed cleanly in sim while the same demo
+            # measured against the real ready pose demanded J4=182deg
+            # (limit 84deg) and violated joint limits on 14% of frames. "It
+            # worked in --sim" has to mean something about the real arm, and
+            # it cannot unless both start from the same place.
+            #
+            # The previous value was a posture tuned for this env's own cable
+            # task (gripper ~10cm above the table, reaching horizontally,
+            # every joint >=30deg from its limit, no interpenetration with
+            # the table/cable/poles). That tuning is deliberately dropped:
+            # this env exists as practice/scaffolding for the real FR5 work,
+            # so matching the real arm outranks its own task's ergonomics.
+            np.concatenate(
+                [np.deg2rad(RealFairino5DemoEnv.READY_POSE_DEG), np.zeros(2)]
             ),
             **kwargs,
         )

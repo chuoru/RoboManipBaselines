@@ -27,6 +27,17 @@ vive_to_eef_frame_rotation:
 # all 3 axes, pairwise angles between the 3 measured directions all within ~2 deg
 # of 90 deg -- see conversation history for the earlier miscalibrated attempts).
 vive_world_to_base_frame_rotation:
-  - [0.963316, 0.264909, 0.042959]
-  - [-0.265669, 0.963977, 0.012966]
-  - [-0.037977, -0.023903, 0.998993]
+  - [-0.937259, -0.343218, 0.061205]
+  - [0.343305, -0.939177, -0.009423]
+  - [0.060716, 0.012181, 0.998081]# vive_to_eef_translation: measured mechanical offset from the TCP origin to
+# the tracker, in TCP-frame coordinates [m]. This rig's TCP convention is
+# +Z forward, +Y down, +X left, and the tracker is mounted 7cm ABOVE (-Y) and
+# 4cm BEHIND (-Z) the TCP origin. Not a fitted quantity -- measured off the
+# rig, so it is entered directly rather than calibrated. See
+# ViveInputDevice.vive_to_eef_translation for why it matters (an 8.1cm lever
+# arm turns a 90deg wrist twist into ~10cm of phantom translation).
+vive_to_eef_translation: [0.0, -0.07, -0.04]
+# The FR5 this demo is replayed onto uses the binary "tool_do" gripper, so the
+# button snaps fully open/closed instead of ramping -- see
+# ViveInputDevice.gripper_toggle for why the ramp silently never closed it.
+gripper_toggle: true

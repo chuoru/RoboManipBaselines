@@ -2,28 +2,24 @@
 robot-less handheld rig -- see envs/real/umi/RealUMIEnvBase.py) is retargetable
 onto the real FR5 arm (RealFairino5DemoEnv), without moving any hardware.
 
-Without --vive_config, the UMI rig and the FR5 base have no calibrated common
-frame (unlike the teleoperated-robot envs, where ViveInputDevice's
-vive_world_to_base_frame_rotation ties the tracker to the robot base -- see
-teleop/README.md and teleop/calibrate_vive_world_frame.py), so this script
-falls back to a naive delta-pose retarget (the UMI trajectory's motion
-relative to its first frame, added onto the FR5's init_qpos EEF pose with an
-identity rotation frame for translation).
+RETARGETING: this MUST stay identical to misc/ReplayUmiOnFairino5.py's, or
+the check stops predicting the script it exists to predict. Both rotation and
+translation are pure EEF/TCP-LOCAL reproductions -- "do the same relative
+motion, on FR5's own gripper, starting from FR5's own init pose" -- which is
+inherently independent of how the recording room relates to the FR5's base,
+so no vive_world_to_base_frame_rotation (room-vs-base) calibration is used
+anywhere here. See ReplayUmiOnFairino5.py's docstring for the full
+derivation, and for the earlier, wrong versions (a room-frame rotation
+composition that scrambled axes, and a batch translation delta that broke as
+soon as the demo also rotated) that this replaced.
 
---vive_config: pass the SAME teleop/configs/*.yaml used to record this demo
-(e.g. teleop/configs/ViveUMI.yaml) to use its calibrated
-vive_world_to_base_frame_rotation for the translation retarget instead,
-exactly like misc/ReplayUmiOnFairino5.py's --vive_config (see that module's
-docstring for the exact math/rationale -- both scripts must be given the
-SAME --vive_config for this check to actually predict that script's
-behavior). Its pos_scale is used as the --pos_scale default if --pos_scale
-is not passed explicitly.
+--vive_config / --pos_scale / --pose_key: pass the SAME values you plan to
+pass to ReplayUmiOnFairino5.py. Only pos_scale is read from the config.
 
-Either way, this sanity-checks that the *scale* of motion in the recorded
-demo is plausible for the FR5 to execute -- i.e. it stays within the arm's
-reach and joint limits and does not run through a singularity. It is not a
-substitute for calibrating the real retargeting transform before running on
-hardware.
+This sanity-checks that the *scale* of motion in the recorded demo is
+plausible for the FR5 to execute -- i.e. it stays within the arm's reach and
+joint limits and does not run through a singularity -- before any hardware
+moves.
 
 Manipulability check: beyond hard joint-limit/reachability failures, this
 also flags segments with LOW manipulability (small Jacobian minimum singular
@@ -36,13 +32,13 @@ track in real time, well past --time_scale slowdown in
 ReplayUmiOnFairino5.py. This check exists to catch that BEFORE moving real
 hardware, not just after.
 
-Note on rotation: the recorded MEASURED_EEF_POSE already has the UMI rig's
-vive_to_eef_frame_rotation conjugation baked in by ViveInputDevice.set_command_data
-at recording time (RealUMIEnvBase._set_action echoes the command straight back
-as "measured", since the rig has no physical plant to converge). So the
-rotation delta computed here between recorded frames is used as-is -- it must
-NOT be conjugated by vive_to_eef_frame_rotation again, which would apply that
-rotation twice.
+Note on rotation: the recorded pose already has the UMI rig's
+vive_to_eef_frame_rotation conjugation baked in by
+ViveInputDevice.set_command_data at recording time (RealUMIEnvBase._set_action
+echoes the command straight back as "measured", since the rig has no physical
+plant to converge). So the rotation delta computed here between recorded
+frames is used as-is -- it must NOT be conjugated by
+vive_to_eef_frame_rotation again, which would apply that rotation twice.
 """
 
 import argparse
@@ -76,17 +72,26 @@ def parse_argument():
     )
     parser.add_argument("rmb_filename", type=str, help="UMI demo .rmb/.hdf5 file")
     parser.add_argument(
+        "--pose_key",
+        type=str,
+        default=DataKey.COMMAND_EEF_POSE,
+        choices=[DataKey.COMMAND_EEF_POSE, DataKey.MEASURED_EEF_POSE],
+        help="which recorded EEF pose sequence to retarget. Must match "
+        "ReplayUmiOnFairino5.py's --pose_key (same default) for this check "
+        "to predict that script -- see its help for why command_eef_pose is "
+        "the right one.",
+    )
+    parser.add_argument(
         "--vive_config",
         type=str,
         default=None,
         help="teleop/configs/*.yaml used to record this demo (e.g. "
-        "teleop/configs/ViveUMI.yaml) -- if given, its calibrated "
-        "vive_world_to_base_frame_rotation is used for the translation "
-        "retarget instead of the identity-rotation naive fallback (see "
-        "module docstring). Pass the SAME file you plan to pass to "
-        "ReplayUmiOnFairino5.py's --vive_config for this check to actually "
-        "predict that script's behavior. Its pos_scale is also used as the "
-        "--pos_scale default if --pos_scale is not passed explicitly.",
+        "teleop/configs/ViveUMI.yaml) -- only its pos_scale is used, as the "
+        "--pos_scale default if --pos_scale is not passed explicitly. Pass "
+        "the SAME file (and the same --pos_scale/--pose_key) you plan to "
+        "pass to ReplayUmiOnFairino5.py for this check to actually predict "
+        "that script's behavior. See the module docstring for why "
+        "vive_world_to_base_frame_rotation is not used by the retargeting.",
     )
     parser.add_argument(
         "--pos_scale",
@@ -310,30 +315,21 @@ def solve_ik(model, data, q_init, target_se3, eef_joint_id):
 def main():
     args = parse_argument()
 
-    # vive_world_to_base_frame_rotation calibrates the room-to-base rotation
-    # applied to the translation delta -- see
-    # ReplayUmiOnFairino5.py's module docstring/ViveInputDevice.set_command_data
-    # for the exact math. vive_to_eef_frame_rotation from the same config is
-    # intentionally NOT loaded/reapplied here: it's already baked into the
-    # recorded MEASURED_EEF_POSE rotation at record time (see this module's
-    # docstring's rotation note), and reapplying it here would double it.
-    vive_world_to_base_frame_rotation = np.eye(3)
+    # This check only means something if it retargets EXACTLY the way
+    # misc/ReplayUmiOnFairino5.py does -- see that module's docstring for the
+    # derivation. Keep the two in sync. In particular
+    # vive_world_to_base_frame_rotation (room-vs-base placement) is NOT read:
+    # both channels are pure EEF/TCP-local reproductions, which makes
+    # retargeting independent of how the room relates to the robot's base.
+    # vive_to_eef_frame_rotation is not reapplied either -- it is already
+    # baked into the recording (see the docstring's rotation note), and
+    # applying it again would double it. So --vive_config is read only for
+    # its pos_scale.
     config_pos_scale = None
     if args.vive_config is not None:
         print(f"[CheckUmiFairino5Reachability] Load {args.vive_config}")
         with open(args.vive_config, "r") as f:
             vive_config = yaml.safe_load(f)
-        if "vive_world_to_base_frame_rotation" in vive_config:
-            vive_world_to_base_frame_rotation = np.array(
-                vive_config["vive_world_to_base_frame_rotation"], dtype=np.float64
-            )
-            assert vive_world_to_base_frame_rotation.shape == (3, 3)
-        else:
-            print(
-                "[CheckUmiFairino5Reachability] Warning: --vive_config has no "
-                "vive_world_to_base_frame_rotation; falling back to identity "
-                "(same as not passing --vive_config at all)."
-            )
         config_pos_scale = vive_config.get("pos_scale")
     pos_scale = args.pos_scale
     if pos_scale is None:
@@ -357,7 +353,7 @@ def main():
 
     print(f"[CheckUmiFairino5Reachability] Load {args.rmb_filename}")
     with RmbData(args.rmb_filename) as rmb_data:
-        umi_pose = rmb_data[DataKey.MEASURED_EEF_POSE][:]  # (T, 7): tx,ty,tz,qw,qx,qy,qz
+        umi_pose = rmb_data[args.pose_key][:]  # (T, 7): tx,ty,tz,qw,qx,qy,qz
         time_seq = rmb_data[DataKey.TIME][:]
 
     n_steps = umi_pose.shape[0]
@@ -430,31 +426,40 @@ def main():
     min_singular_value_log = np.zeros(n_steps)
     target_se3_list = []
 
+    # Running state for the translation accumulation below.
+    fr5_translation = init_se3.translation.copy()
+    prev_umi_se3 = umi_se3_0
+
     for t in range(n_steps):
         umi_se3_t = umi_se3_list[t]
-        # Translation delta is rotated into the FR5 base frame by
-        # vive_world_to_base_frame_rotation (identity, i.e. the old naive
-        # behavior, unless --vive_config was given) -- see module docstring.
-        # Rotation delta is used as-is: it already has vive_to_eef_frame_rotation
-        # baked in from recording (see module docstring's rotation note) --
-        # conjugating by it again here would apply it twice.
+        # Retarget exactly as misc/ReplayUmiOnFairino5.py does -- both
+        # channels are pure EEF/TCP-LOCAL reproductions, so no
+        # vive_world_to_base_frame_rotation is involved. See that module's
+        # docstring for the derivation and the wrong versions this replaced;
+        # if that math changes, change it here too or this check stops
+        # predicting the replay it exists to predict.
         #
-        # delta_umi_rotation is applied to init_se3.rotation by LEFT-multiply
-        # (world-frame composition), not right-multiply (body-frame
-        # composition) -- see ReplayUmiOnFairino5.py's matching comment for
-        # the full explanation and a real-demo numeric confirmation. In
-        # short: umi.urdf's floating joint has zero rotation offset from
-        # world_link, so delta_umi_rotation is effectively already a
-        # WORLD-frame quantity; right-multiplying it onto init_se3.rotation
-        # silently reinterprets each world-frame axis through FR5's own
-        # (unrelated) initial orientation, scrambling roll/pitch/yaw.
-        target_translation = init_se3.translation + pos_scale * (
-            vive_world_to_base_frame_rotation
-            @ (umi_se3_t.translation - umi_se3_0.translation)
-        )
+        # Rotation: delta_umi_rotation is already an EEF-local delta
+        # (ViveInputDevice.set_command_data composed it via right-multiply
+        # onto eef_se3_at_enable.rotation), so it is reapplied onto FR5's own
+        # init orientation the same way -- RIGHT-multiply.
         delta_umi_rotation = umi_se3_0.rotation.T @ umi_se3_t.rotation
-        target_rotation = delta_umi_rotation @ init_se3.rotation
-        target_se3 = pin.SE3(target_rotation, target_translation)
+        target_rotation = init_se3.rotation @ delta_umi_rotation
+
+        # Translation: the recorded position is an ACCUMULATION of per-frame
+        # EEF-local increments, each re-projected by that frame's own
+        # orientation, so it cannot be retargeted as one batch delta from
+        # t=0. Recover this frame's local increment with THIS frame's own
+        # rotation, then re-accumulate it through FR5's own (already
+        # retargeted) orientation.
+        raw_translation_delta = umi_se3_t.translation - prev_umi_se3.translation
+        translation_delta_eef_local = umi_se3_t.rotation.T @ raw_translation_delta
+        fr5_translation = fr5_translation + pos_scale * (
+            target_rotation @ translation_delta_eef_local
+        )
+        prev_umi_se3 = umi_se3_t
+
+        target_se3 = pin.SE3(target_rotation, fr5_translation.copy())
         target_se3_list.append(target_se3)
 
         q_arm, err_norm, _n_iters = solve_ik(model, data, q_arm, target_se3, EEF_JOINT_ID)

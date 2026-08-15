@@ -85,7 +85,9 @@ class ViveInputDevice(InputDeviceBase):
         device_params,
         pos_scale=1.0,
         gripper_scale=5.0,
+        gripper_toggle=False,
         vive_to_eef_frame_rotation=None,
+        vive_to_eef_translation=None,
         vive_world_to_base_frame_rotation=None,
         gripper_key_bindings=None,
     ):
@@ -96,6 +98,24 @@ class ViveInputDevice(InputDeviceBase):
         self.serial_number = device_params["serial_number"]
         self.pos_scale = pos_scale
         self.gripper_scale = gripper_scale
+        # How the tracker's button drives the gripper.
+        #
+        # False (default): each press flips the RAMP DIRECTION, and the
+        # command then integrates by gripper_scale every frame while held --
+        # suited to a gripper with a continuous width (e.g. LinkerHand),
+        # where intermediate openings are meaningful.
+        #
+        # True: each press snaps the command straight to fully closed or
+        # fully open. Use this for a BINARY gripper (RealFairino5EnvBase's
+        # "tool_do" type), where intermediate values have no meaning and the
+        # ramp is actively harmful: at gripper_scale=5 the command needs 20
+        # consecutive frames to travel 0->100%, which on the UMI rig's ~8.3 Hz
+        # loop means holding the button ~2.4s. A real recording measured this
+        # way peaked at 40% -- never crossing the 50% threshold
+        # _send_gripper_command uses to close a tool_do gripper -- so the
+        # gripper never actuated on replay even though the demo clearly
+        # opened and closed it.
+        self.gripper_toggle = gripper_toggle
         # Rotates a tracker-local *rotation* delta into the EEF's own local (TCP)
         # frame -- see set_command_data(). Depends on how the tracker happens to
         # be held each session; calibrate with calibrate_vive_axes.py.
@@ -120,6 +140,24 @@ class ViveInputDevice(InputDeviceBase):
                 vive_world_to_base_frame_rotation, dtype=np.float64
             )
         assert self.vive_world_to_base_frame_rotation.shape == (3, 3)
+
+        # Lever arm from the TCP origin to the tracker, in TCP-frame
+        # coordinates [m]. A tracker bolted to a rig sits some distance from
+        # the TCP it is standing in for, and that offset makes the tracker
+        # swing whenever the tool merely ROTATES: with the UMI rig's measured
+        # (0, -0.07, -0.04) -- 8.1cm of lever arm -- a 90 deg wrist twist
+        # moves the tracker ~10cm while the TCP has not translated at all.
+        # Uncorrected that reads as a real 10cm translation command, on a demo
+        # whose entire translation range is ~25cm. Unlike
+        # vive_to_eef_frame_rotation this is not fitted from motion; it is a
+        # measured mechanical dimension, so it is entered directly.
+        if vive_to_eef_translation is None:
+            self.vive_to_eef_translation = np.zeros(3)
+        else:
+            self.vive_to_eef_translation = np.array(
+                vive_to_eef_translation, dtype=np.float64
+            )
+        assert self.vive_to_eef_translation.shape == (3,)
 
         self.gripper_key_bindings = gripper_key_bindings
         self.keyboard_state = None
@@ -285,7 +323,16 @@ class ViveInputDevice(InputDeviceBase):
                     self.enabled_teleop = True
                     self.vive_se3_at_enable = current_se3.copy()
                     self.eef_se3_at_enable = self.arm_manager.current_se3.copy()
-                    self._prev_vive_translation = current_se3.translation.copy()
+                    # Seed with the TCP position, not the raw tracker
+                    # position, to match what set_command_data() differences
+                    # against (see the lever-arm correction there) -- seeding
+                    # with the tracker position would make the very first
+                    # frame register a spurious lever-arm-sized jump.
+                    self._prev_vive_translation = current_se3.translation - (
+                        current_se3.rotation
+                        @ self.vive_to_eef_frame_rotation.T
+                        @ self.vive_to_eef_translation
+                    )
                     print(
                         f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}'."
                     )
@@ -340,6 +387,20 @@ class ViveInputDevice(InputDeviceBase):
     def is_ready(self):
         return self.state is not None
 
+    def _gripper_limit(self, closed):
+        """Fully-closed / fully-open gripper command, for gripper_toggle mode.
+
+        Taken from the env's action space rather than hardcoded, so this works
+        for any gripper convention (percent-closed 0..100 on the Fairino envs,
+        metres on the MuJoCo ones) without the caller knowing which.
+        set_command_gripper_joint_pos clips to these same bounds anyway; going
+        straight to the bound is what makes the press a toggle rather than the
+        first step of a ramp.
+        """
+        idxes = self.arm_manager.body_config.gripper_joint_idxes_for_limit
+        space = self.arm_manager.env.action_space
+        return (space.high if closed else space.low)[idxes].astype(np.float64)
+
     def set_command_data(self):
         if (not self.enabled_teleop) or (self.state is None):
             return
@@ -377,8 +438,22 @@ class ViveInputDevice(InputDeviceBase):
         # libsurvive's lighthouse-anchored pose solve, an absolute measurement each
         # frame (not itself an integrated/drifting quantity), so accumulated error
         # here is bounded by that measurement's noise, not an unbounded bias.
+        # Work from where the TCP is, not where the tracker is. The tracker
+        # sits at p_tcp + R_tcp @ r (r = vive_to_eef_translation, in TCP
+        # coordinates), so the TCP is recovered by subtracting that lever arm.
+        # R_tcp in world is state["se3"].rotation @ vive_to_eef_frame_rotation.T
+        # (that matrix maps TCP-frame coordinates to tracker-frame ones, see
+        # its use above), giving
+        #     p_tcp = p_tracker - R_vive @ M.T @ r
+        # Without this the tool's own rotation injects phantom translation --
+        # see vive_to_eef_translation's comment for the magnitude.
+        tcp_translation = self.state["se3"].translation - (
+            self.state["se3"].rotation
+            @ self.vive_to_eef_frame_rotation.T
+            @ self.vive_to_eef_translation
+        )
         raw_translation_delta_incremental = (
-            self.state["se3"].translation - self._prev_vive_translation
+            tcp_translation - self._prev_vive_translation
         )
         translation_delta_tracker_local = (
             self.state["se3"].rotation.T @ raw_translation_delta_incremental
@@ -386,7 +461,7 @@ class ViveInputDevice(InputDeviceBase):
         translation_delta_eef_local = (
             self.vive_to_eef_frame_rotation @ translation_delta_tracker_local
         )
-        self._prev_vive_translation = self.state["se3"].translation.copy()
+        self._prev_vive_translation = tcp_translation.copy()
 
         target_translation = self.arm_manager.target_se3.translation + self.pos_scale * (
             target_rotation @ translation_delta_eef_local
@@ -401,19 +476,31 @@ class ViveInputDevice(InputDeviceBase):
         if self.gripper_key_bindings is not None:
             gripper_joint_pos = self.arm_manager.get_command_gripper_joint_pos().copy()
             kb = self.gripper_key_bindings
-            if self.keyboard_state[kb["gripper_close"]] and not self.keyboard_state[
-                kb["gripper_open"]
-            ]:
+            closing = self.keyboard_state[kb["gripper_close"]] and not (
+                self.keyboard_state[kb["gripper_open"]]
+            )
+            opening = self.keyboard_state[kb["gripper_open"]] and not (
+                self.keyboard_state[kb["gripper_close"]]
+            )
+            if self.gripper_toggle:
+                if closing:
+                    gripper_joint_pos = self._gripper_limit(closed=True)
+                elif opening:
+                    gripper_joint_pos = self._gripper_limit(closed=False)
+            elif closing:
                 gripper_joint_pos += self.gripper_scale
-            elif self.keyboard_state[kb["gripper_open"]] and not self.keyboard_state[
-                kb["gripper_close"]
-            ]:
+            elif opening:
                 gripper_joint_pos -= self.gripper_scale
             self.arm_manager.set_command_gripper_joint_pos(gripper_joint_pos)
         elif self._gripper_direction_initialized:
-            gripper_joint_pos = self.arm_manager.get_command_gripper_joint_pos().copy()
-            if self._gripper_closing:
-                gripper_joint_pos += self.gripper_scale
+            if self.gripper_toggle:
+                gripper_joint_pos = self._gripper_limit(closed=self._gripper_closing)
             else:
-                gripper_joint_pos -= self.gripper_scale
+                gripper_joint_pos = (
+                    self.arm_manager.get_command_gripper_joint_pos().copy()
+                )
+                if self._gripper_closing:
+                    gripper_joint_pos += self.gripper_scale
+                else:
+                    gripper_joint_pos -= self.gripper_scale
             self.arm_manager.set_command_gripper_joint_pos(gripper_joint_pos)

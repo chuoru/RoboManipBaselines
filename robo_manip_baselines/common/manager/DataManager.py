@@ -117,8 +117,29 @@ class DataManager:
         if increment_episode_idx:
             self.episode_idx += 1
 
+    @staticmethod
+    def calc_fps(all_data_seq):
+        """Frame rate the episode was actually recorded at, from its own
+        DataKey.TIME sequence.
+
+        Videos must be written with this, not videoio's default: the loop
+        rate depends on what the episode had to do each step (a Vive-driven
+        UMI episode measured ~8.4 Hz because of tracker-read overhead), so a
+        default 25 fps file plays that back at ~3x speed, which looks like
+        the operator moved much faster than they did. Returns None when the
+        rate cannot be determined, letting videoio fall back to its default.
+        """
+        time_seq = all_data_seq.get(DataKey.TIME)
+        if time_seq is None or len(time_seq) < 2:
+            return None
+        duration = float(time_seq[-1]) - float(time_seq[0])
+        if duration <= 0.0:
+            return None
+        return (len(time_seq) - 1) / duration
+
     def dump_to_rmb(self, filename, all_data_seq, meta_data):
         os.makedirs(filename)
+        fps = self.calc_fps(all_data_seq)
         hdf5_filename = os.path.join(filename, "main.rmb.hdf5")
         with h5py.File(hdf5_filename, "w") as h5file:
             tasks = []
@@ -144,14 +165,16 @@ class DataManager:
                         video_filename = os.path.join(filename, f"{key}.rmb.mp4")
                         images = np.array(all_data_seq[key])
                         tasks.append(
-                            executor.submit(self.save_rgb_image, video_filename, images)
+                            executor.submit(
+                                self.save_rgb_image, video_filename, images, fps
+                            )
                         )
                     elif DataKey.is_depth_image_key(key):
                         video_filename = os.path.join(filename, f"{key}.rmb.mp4")
                         images = (1e3 * np.array(all_data_seq[key])).astype(np.uint16)
                         tasks.append(
                             executor.submit(
-                                self.save_depth_image, video_filename, images
+                                self.save_depth_image, video_filename, images, fps
                             )
                         )
                     else:
@@ -185,12 +208,12 @@ class DataManager:
             h5file.attrs["format"] = "RmbData-SingleHDF5"
 
     @staticmethod
-    def save_rgb_image(video_filename, images):
-        videoio.videosave(video_filename, images)
+    def save_rgb_image(video_filename, images, fps=None):
+        videoio.videosave(video_filename, images, fps=fps)
 
     @staticmethod
-    def save_depth_image(video_filename, images):
-        videoio.uint16save(video_filename, images)
+    def save_depth_image(video_filename, images, fps=None):
+        videoio.uint16save(video_filename, images, fps=fps)
 
     def load_data(self, filename, load_keys=None, skip_image=False):
         """Load data."""

@@ -35,8 +35,8 @@ class OperationRealFairino5Demo:
         gripper_hand_type="right",
         gripper_modbus_port="/dev/ttyUSB0",
         gripper_type="tool_do",
-        gripper_do_id=1,
-        gripper_do_close_status=0,
+        gripper_do_close_id=0,
+        gripper_do_open_id=1,
         dry_run=False,
     ):
         self.robot_ip = robot_ip
@@ -46,8 +46,8 @@ class OperationRealFairino5Demo:
         self.gripper_hand_type = gripper_hand_type
         self.gripper_modbus_port = gripper_modbus_port
         self.gripper_type = gripper_type
-        self.gripper_do_id = gripper_do_id
-        self.gripper_do_close_status = gripper_do_close_status
+        self.gripper_do_close_id = gripper_do_close_id
+        self.gripper_do_open_id = gripper_do_open_id
         self.dry_run = dry_run
         super().__init__()
 
@@ -61,8 +61,8 @@ class OperationRealFairino5Demo:
             gripper_hand_type=self.gripper_hand_type,
             gripper_modbus_port=self.gripper_modbus_port,
             gripper_type=self.gripper_type,
-            gripper_do_id=self.gripper_do_id,
-            gripper_do_close_status=self.gripper_do_close_status,
+            gripper_do_close_id=self.gripper_do_close_id,
+            gripper_do_open_id=self.gripper_do_open_id,
             dry_run=self.dry_run,
         )
 

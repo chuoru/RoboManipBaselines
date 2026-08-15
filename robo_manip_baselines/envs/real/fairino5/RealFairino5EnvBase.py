@@ -73,17 +73,29 @@ class RealFairino5EnvBase(RealEnvBase):
         gripper_modbus_port="/dev/ttyUSB0",
         # "linker_hand": LinkerHand RS485 gripper with continuous 0-100% width
         # control (see _gripper_pose). "tool_do": a simple binary gripper
-        # wired to the Fairino's own tool digital output (SetToolDO/GetToolDO),
-        # toggled open/closed via gripper_do_id -- no continuous width. Default
-        # is "tool_do" since the currently-mounted gripper is the IAI one.
+        # wired to the Fairino's own tool digital outputs (SetToolDO) -- no
+        # continuous width. Default is "tool_do" since the currently-mounted
+        # gripper is the IAI one.
         gripper_type="tool_do",
-        gripper_do_id=1,
-        # DO status (0 or 1) that closes the gripper; the other value opens it.
-        # Confirmed on real hardware via misc/TestGripperToolDO.py: DO1=1 opens,
-        # DO1=0 closes (DO0 is not wired to this gripper at all).
-        gripper_do_close_status=0,
+        # The two tool DO lines driving the binary gripper: one closes it, the
+        # other opens it, each acting on its rising edge (see
+        # _send_gripper_command). Measured on the real arm with
+        # misc/TestGripperToolDO.py: DO0=1 closes, DO1=1 opens, and driving
+        # either line to 0 does nothing.
+        gripper_do_close_id=0,
+        gripper_do_open_id=1,
         dry_run=False,
         command_smoothing_alpha=0.3,
+        # ServoJ's own tuning knobs, exposed so they can be swept against real
+        # hardware (see misc/TestFr5ServoJResponse.py) rather than being
+        # buried as literals at the call site. Defaults reproduce what the
+        # SDK's own examples pass. filterT/gain are the controller-side
+        # smoothing and tracking-gain terms; the vendor examples leave both
+        # at 0.0, but the real arm was measured tracking a slow commanded
+        # trajectory at only 26-45% amplitude on the wrist joints, so these
+        # are the first thing to test when tracking is that poor.
+        servoj_filter_t=0.0,
+        servoj_gain=0.0,
         pointcloud_camera_ids=None,
         **kwargs,
     ):
@@ -92,10 +104,13 @@ class RealFairino5EnvBase(RealEnvBase):
         # Setup robot
         self.init_qpos = init_qpos
         self.dry_run = dry_run
+        self.servoj_filter_t = servoj_filter_t
+        self.servoj_gain = servoj_gain
         self.gripper_type = gripper_type
-        self.gripper_do_id = gripper_do_id
-        self.gripper_do_close_status = gripper_do_close_status
-        self._last_gripper_do_status = None
+        self.gripper_do_close_id = gripper_do_close_id
+        self.gripper_do_open_id = gripper_do_open_id
+        # None until this process has commanded the gripper at least once.
+        self._last_gripper_closing = None
         self._last_servoj_time = None
         self._last_gripper_percent_closed = 50.0
         # Gates whether _set_action actually transmits ServoJ/gripper commands to
@@ -175,8 +190,10 @@ class RealFairino5EnvBase(RealEnvBase):
                 # (already connected above) is used directly in _set_action/_get_obs.
                 self.gripper = None
                 print(
-                    f"[{self.__class__.__name__}] Using IAI gripper via tool DO"
-                    f"{self.gripper_do_id} (no separate gripper connection)."
+                    f"[{self.__class__.__name__}] Using IAI gripper via tool "
+                    f"DO{self.gripper_do_close_id} (close) / "
+                    f"DO{self.gripper_do_open_id} (open) "
+                    "(no separate gripper connection)."
                 )
             else:
                 raise ValueError(
@@ -297,18 +314,39 @@ class RealFairino5EnvBase(RealEnvBase):
         if self.gripper_type == "linker_hand":
             self.gripper.finger_move(pose=self._gripper_pose(gripper_percent_closed))
         else:
-            # tool_do: no continuous width, just threshold to binary open/close.
-            do_status = (
-                self.gripper_do_close_status
-                if gripper_percent_closed >= 50.0
-                else 1 - self.gripper_do_close_status
+            # tool_do: no continuous width, just threshold to binary
+            # open/close.
+            #
+            # This IAI gripper is a DOUBLE-ACTING pair: one tool DO line
+            # drives "close", a DIFFERENT one drives "open", and each acts on
+            # its rising edge -- driving a line to 0 does nothing at all.
+            # Measured with misc/TestGripperToolDO.py on the real arm:
+            #   DO0=1 -> closes      DO0=0 -> nothing
+            #   DO1=1 -> opens       DO1=0 -> nothing
+            # An earlier single-line reading of this ("DO1=1 opens, DO1=0
+            # closes") was wrong about the closing half, and the resulting
+            # one-line scheme could only ever open the gripper: closing sent
+            # DO1=0, which does nothing. That is exactly what a UMI replay
+            # showed -- a demo whose commands crossed the close threshold for
+            # 12.8 continuous seconds never actuated the gripper.
+            closing = gripper_percent_closed >= 50.0
+            if closing == self._last_gripper_closing:
+                # SetToolDO is a blocking XML-RPC call; only send on a state
+                # change, not every control-loop tick (unlike LinkerHand's
+                # finger_move, which is cheap enough to call every frame).
+                return
+
+            active_do_id = (
+                self.gripper_do_close_id if closing else self.gripper_do_open_id
             )
-            # SetToolDO is a blocking XML-RPC call; only send it on a state
-            # change instead of every control-loop tick (unlike LinkerHand's
-            # finger_move, which is cheap enough to call every frame).
-            if do_status != self._last_gripper_do_status:
-                self._check_fr_code(self.robot.SetToolDO(self.gripper_do_id, do_status))
-                self._last_gripper_do_status = do_status
+            inactive_do_id = (
+                self.gripper_do_open_id if closing else self.gripper_do_close_id
+            )
+            # Release the opposite line before asserting this one, so the two
+            # halves are never driven at once.
+            self._check_fr_code(self.robot.SetToolDO(inactive_do_id, 0))
+            self._check_fr_code(self.robot.SetToolDO(active_do_id, 1))
+            self._last_gripper_closing = closing
 
     def setup_input_device(self, input_device_name, motion_manager, overwrite_kwargs):
         if input_device_name == "spacemouse":
@@ -376,6 +414,9 @@ class RealFairino5EnvBase(RealEnvBase):
         )
 
         self._filtered_arm_joint_pos_command = None
+        # The arm is about to be moved by MoveJ, outside the ServoJ command
+        # stream, so any previous anchor is stale -- see _reset_robot().
+        self._prev_arm_joint_pos_command = None
 
         # Open the gripper BEFORE moving the arm, not after: if the gripper was
         # left closed around something from a previous session, moving the arm
@@ -500,14 +541,21 @@ class RealFairino5EnvBase(RealEnvBase):
             # similar to fairino_keyboard_teleop/devices/fairino/interface.py for ServoCart.
             # The controller's XML-RPC endpoint expects exactly 7 parameters for ServoJ.
             # All values must be Python floats (not numpy.float64) for XML-RPC serialization.
+            # EXACTLY 7 arguments -- do NOT add the SDK wrapper's 8th `id`
+            # parameter. Robot.ServoJ passes 8 (…, gain, id), but this
+            # controller's XML-RPC endpoint rejects that outright:
+            #   Fault -502: "Format string requests exactly 7 items from
+            #   array, but array has 8 items."
+            # which is why this calls the raw proxy directly instead of going
+            # through the SDK wrapper at all. Verified against the real arm.
             fr_code = self.robot.robot.ServoJ(
                 joint_pos_list,
                 exaxis_list,
-                0.0,            # acc
-                0.0,            # vel
-                float(cmd_t),   # cmdT
-                0.0,            # filterT
-                0.0             # gain
+                0.0,                            # acc
+                0.0,                            # vel
+                float(cmd_t),                   # cmdT
+                float(self.servoj_filter_t),    # filterT
+                float(self.servoj_gain),        # gain
             )
             self._check_fr_code(fr_code)
 
@@ -577,7 +625,7 @@ class RealFairino5EnvBase(RealEnvBase):
                     gripper_percent_closed = self._last_gripper_percent_closed
             else:
                 # tool_do: no width sensor, only the binary DO state. Trust
-                # _last_gripper_do_status (updated whenever we command it, see
+                # _last_gripper_closing (updated whenever we command it, see
                 # _send_gripper_command) instead of polling GetToolDO() here --
                 # that was an extra synchronous XML-RPC round trip on every
                 # single control-loop tick (in addition to the
@@ -588,12 +636,10 @@ class RealFairino5EnvBase(RealEnvBase):
                 # out-of-band DO toggle (e.g. from a teach pendant) won't be
                 # reflected here, only DO changes this process itself sent.
                 try:
-                    if self._last_gripper_do_status is None:
+                    if self._last_gripper_closing is None:
                         raise RuntimeError("no gripper command sent yet")
                     gripper_percent_closed = (
-                        100.0
-                        if self._last_gripper_do_status == self.gripper_do_close_status
-                        else 0.0
+                        100.0 if self._last_gripper_closing else 0.0
                     )
                     self._last_gripper_percent_closed = gripper_percent_closed
                 except Exception as e:

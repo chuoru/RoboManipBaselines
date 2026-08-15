@@ -520,8 +520,21 @@ class TeleopBase(OperationDataMixin, ABC):
             ):
                 self.iteration_duration_list.append(iteration_duration)
 
-            if (not self.auto_mode) and (iteration_duration < self.env.unwrapped.dt):
-                time.sleep(self.env.unwrapped.dt - iteration_duration)
+            target_duration = self.get_target_duration()
+            if (not self.auto_mode) and (iteration_duration < target_duration):
+                time.sleep(target_duration - iteration_duration)
+
+    def get_target_duration(self):
+        # During replay, pace each step by the wall-clock gap recorded at teleop
+        # time (DataKey.TIME), not by env.dt -- the original recording's per-step
+        # duration can exceed env.dt (e.g. input device polling overhead), and
+        # replaying at env.dt would then run faster than the recorded motion,
+        # which is unsafe on real hardware.
+        if self.phase_manager.is_phases(["ReplayPhase"]):
+            time_seq = self.replay_data_manager.get_data_seq(DataKey.TIME)
+            if 0 < self.teleop_time_idx < len(time_seq):
+                return time_seq[self.teleop_time_idx] - time_seq[self.teleop_time_idx - 1]
+        return self.env.unwrapped.dt
 
     def reset(self):
         # Reset motion manager
@@ -626,24 +639,103 @@ class TeleopBase(OperationDataMixin, ABC):
             )
             window_image = phase_image
         else:
-            # Match the phase strip's width to the concatenated rgb+depth panels
-            # (2x CAMERA_PANEL_WIDTH) so it spans the full window width.
+            camera_panel = cv2.hconcat(
+                (cv2.vconcat(rgb_images), cv2.vconcat(depth_images))
+            )
+            vive_panel = self._draw_vive_pose_panel(camera_panel.shape[0])
+            top_row = (
+                cv2.hconcat((camera_panel, vive_panel))
+                if vive_panel is not None
+                else camera_panel
+            )
             phase_image = self.phase_manager.get_phase_image(
-                size=(2 * self.CAMERA_PANEL_WIDTH, 50),
+                size=(top_row.shape[1], 50),
                 get_text_func=self.phase_manager.get_text_func,
                 get_color_func=self.phase_manager.get_color_func,
             )
-            window_image = cv2.vconcat(
-                (
-                    cv2.hconcat((cv2.vconcat(rgb_images), cv2.vconcat(depth_images))),
-                    phase_image,
-                )
-            )
+            window_image = cv2.vconcat((top_row, phase_image))
         cv2.namedWindow(
             "image",
             flags=(cv2.WINDOW_AUTOSIZE | cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL),
         )
         cv2.imshow("image", cv2.cvtColor(window_image, cv2.COLOR_RGB2BGR))
+
+    VIVE_TRAIL_MAXLEN = 200  # ~6 s at 30 Hz
+
+    def _draw_vive_pose_panel(self, height):
+        """Render a headless matplotlib 3D Vive-tracker pose panel and return a BGR image."""
+        from .ViveInputDevice import ViveInputDevice
+
+        vive_dev = next(
+            (d for d in getattr(self, "input_device_list", []) if isinstance(d, ViveInputDevice)),
+            None,
+        )
+        if vive_dev is None:
+            return None
+
+        # Lazy-init headless figure (FigureCanvasAgg → no window opened)
+        if not hasattr(self, "_vive_fig"):
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+            dpi = 72
+            size_in = height / dpi
+            self._vive_fig = Figure(figsize=(size_in, size_in), dpi=dpi)
+            self._vive_canvas = FigureCanvasAgg(self._vive_fig)
+            self._vive_ax = self._vive_fig.add_subplot(111, projection="3d")
+            self._vive_pos_trail = []
+
+        ax = self._vive_ax
+        ax.clear()
+
+        state = getattr(vive_dev, "state", None)
+        if state is not None:
+            pos = state["se3"].translation.copy()
+            rot = state["se3"].rotation
+            self._vive_pos_trail.append(pos)
+            if len(self._vive_pos_trail) > self.VIVE_TRAIL_MAXLEN:
+                self._vive_pos_trail.pop(0)
+        else:
+            pos = rot = None
+
+        # Position trail
+        if len(self._vive_pos_trail) > 1:
+            trail = np.array(self._vive_pos_trail)
+            ax.plot(trail[:, 0], trail[:, 1], trail[:, 2], color="gray", lw=0.8, alpha=0.6)
+
+        # Current tracker pose triad (RGB = XYZ)
+        if pos is not None:
+            triad_len = 0.05  # [m]
+            for i, color in enumerate(("r", "g", "b")):
+                ax.quiver(*pos, *rot[:, i] * triad_len, color=color, linewidth=1.5)
+
+        # Anchor point when teleop enabled
+        vive_se3_at_enable = getattr(vive_dev, "vive_se3_at_enable", None)
+        if vive_se3_at_enable is not None:
+            ap = vive_se3_at_enable.translation
+            ax.scatter(*ap, color="orange", s=30, zorder=5)
+
+        # Auto-scale around trail
+        if self._vive_pos_trail:
+            center = np.mean(self._vive_pos_trail, axis=0)
+            r = max(0.1, np.max(np.abs(np.array(self._vive_pos_trail) - center)) * 1.5)
+            ax.set_xlim(center[0] - r, center[0] + r)
+            ax.set_ylim(center[1] - r, center[1] + r)
+            ax.set_zlim(center[2] - r, center[2] + r)
+
+        status = (
+            "enabled" if getattr(vive_dev, "enabled_teleop", False) else
+            ("tracking" if state is not None else "waiting")
+        )
+        ax.set_title(f"Vive ({status})", fontsize=7, pad=2)
+        ax.set_xlabel("X", fontsize=5)
+        ax.set_ylabel("Y", fontsize=5)
+        ax.set_zlabel("Z", fontsize=5)
+        ax.tick_params(labelsize=4)
+
+        self._vive_canvas.draw()
+        img_rgb = np.asarray(self._vive_canvas.buffer_rgba())[:, :, :3]
+        return cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     def draw_pointcloud(self):
         far_clip_list = (3.0, 3.0, 0.8)  # [m]

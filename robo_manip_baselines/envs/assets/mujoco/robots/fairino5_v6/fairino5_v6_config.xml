@@ -51,6 +51,16 @@
     <exclude body1="forearm_link" body2="wrist1_link"/>
     <exclude body1="wrist1_link" body2="wrist2_link"/>
     <exclude body1="wrist2_link" body2="wrist3_link"/>
+    <!-- forearm/wrist2 are two joints apart, so the adjacency rule above does
+         not cover them, but they still need excluding: MuJoCo collides mesh
+         geoms as their CONVEX HULLS, and the forearm's hull fills in the
+         concave channel the wrist folds into. At the arm's real ready pose
+         (RealFairino5DemoEnv.READY_POSE_DEG) MuJoCo therefore reports 15.4mm
+         of penetration between them while the actual meshes are 16.8mm APART
+         (measured vertex-to-vertex) -- a pure hull artifact, and one that
+         fires at the very pose every episode starts from. Left in, it makes
+         the arm start every replay already resolving a phantom contact. -->
+    <exclude body1="forearm_link" body2="wrist2_link"/>
     <pair geom1="right_side" geom2="right_pinch"/>
     <pair geom1="left_side" geom2="left_pinch"/>
     <exclude body1="gripper_base" body2="right_pinch_link"/>
