@@ -3,7 +3,7 @@ from os import path
 import mujoco
 import numpy as np
 
-from ...real.fairino5.RealFairino5DemoEnv import RealFairino5DemoEnv
+from ...real.fairino5_ready_pose import FAIRINO5_READY_POSE_DEG
 from .MujocoFairino5EnvBase import MujocoFairino5EnvBase
 
 
@@ -41,7 +41,7 @@ class MujocoFairino5CableEnv(MujocoFairino5EnvBase):
             # this env exists as practice/scaffolding for the real FR5 work,
             # so matching the real arm outranks its own task's ergonomics.
             np.concatenate(
-                [np.deg2rad(RealFairino5DemoEnv.READY_POSE_DEG), np.zeros(2)]
+                [np.deg2rad(FAIRINO5_READY_POSE_DEG), np.zeros(2)]
             ),
             **kwargs,
         )

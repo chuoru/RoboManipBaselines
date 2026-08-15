@@ -1,5 +1,6 @@
 import numpy as np
 
+from ..fairino5_ready_pose import FAIRINO5_READY_POSE_DEG
 from .RealFairino5EnvBase import RealFairino5EnvBase
 
 
@@ -11,7 +12,10 @@ class RealFairino5DemoEnv(RealFairino5EnvBase):
     # to a safe, non-singular ready pose, then read it back with
     # `Robot.RPC(robot_ip).GetActualJointPosRadian()` and replace this constant.
     # Also referenced by misc/CheckUmiFairino5Reachability.py so both stay in sync.
-    READY_POSE_DEG = [-65.000, -93.000, -142.000, 56.000, 64.000, -1.000]
+    # Defined in envs/real/fairino5_ready_pose.py rather than inline -- see that
+    # module for why (the MuJoCo FR5 env needs the same value but cannot import
+    # this class, which pulls in the vendor SDK).
+    READY_POSE_DEG = FAIRINO5_READY_POSE_DEG
 
     def __init__(
         self,
