@@ -65,11 +65,12 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip \
     && python3 -m pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} \
          torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchcodec==${TORCHCODEC_VERSION}
 
-# .dockerignore trims this to what the common install + ACT extra need
-# (drops unused vendored third_party/* submodules to keep the build fast).
+# .dockerignore trims this to what the common install + the ACT and
+# diffusion-policy extras need (drops unused vendored third_party/*
+# submodules to keep the build fast).
 COPY . .
 
-RUN python3 -m pip install --no-cache-dir -e ".[act]" \
+RUN python3 -m pip install --no-cache-dir -e ".[act,diffusion-policy]" \
     && cd third_party/act/detr && python3 -m pip install --no-cache-dir -e .
 
 # Reassert the torch/torchvision/torchcodec versions above: pyproject.toml

@@ -4,9 +4,12 @@ checkpoint/
 **/__pycache__
 *.pyc
 
-# Vendored submodules not needed for the common install + ACT extra baked
-# into the image. Still available at runtime via the docker-compose bind
-# mount for manual installation of other policy extras.
+# Vendored submodules not needed for the common install + the ACT and
+# diffusion-policy extras baked into the image. Note third_party/diffusion_policy
+# is deliberately NOT listed here: the policy module imports it directly off
+# the filesystem, so it has to stay in the build context. Everything below is
+# still available at runtime via the docker-compose bind mount, for manual
+# installation of the remaining policy extras.
 third_party/3D-Diffusion-Policy
 third_party/FlowPolicy
 third_party/ManiFlow_Policy
