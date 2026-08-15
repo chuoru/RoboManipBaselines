@@ -391,14 +391,25 @@ class TrainBase(ABC):
         if self.args.use_cached_dataset:
             dataset = CachedDataset(dataset)
 
+        # prefetch_factor/persistent_workers are multiprocessing-only options:
+        # DataLoader rejects them outright when num_workers=0 (single-process
+        # loading). num_workers=0 is worth supporting because worker processes
+        # ship every batch through shared memory, and a container's default
+        # 64MB /dev/shm is far too small for image batches -- that fails with
+        # "unable to allocate shared memory (shm)". Setting num_workers=0 is
+        # the quick way around it (raising the container's --shm-size is the
+        # real fix).
+        dataloader_kwargs = {}
+        if self.args.num_workers > 0:
+            dataloader_kwargs.update(persistent_workers=True, prefetch_factor=4)
+
         dataloader = DataLoader(
             dataset,
             batch_size=self.args.batch_size,
             shuffle=shuffle,
             pin_memory=True,
             num_workers=self.args.num_workers,
-            persistent_workers=True,
-            prefetch_factor=4,
+            **dataloader_kwargs,
         )
 
         return dataloader
