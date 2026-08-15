@@ -5,10 +5,27 @@ from collections import OrderedDict
 import cv2
 import h5py
 import numpy as np
-import torchcodec
 import videoio
 
 from .DataKey import DataKey
+
+# torchcodec decodes RGB videos slightly faster than videoio, but it dlopens
+# FFmpeg's shared libs at import time and each wheel ships loaders for only
+# some FFmpeg major versions -- torchcodec 0.1.1 (the build that pairs with
+# torch 2.5.1, which in turn is pinned for older NVIDIA drivers) ships
+# libtorchcodec{5,6,7}.so only, while Ubuntu 22.04 provides FFmpeg 4
+# (libavutil.so.56). That mismatch makes `import torchcodec` raise, which
+# previously took the whole package down with it -- training could not even
+# start. videoio is already a hard dependency here (the depth path and all
+# video writing use it) and reads the same files, so treat torchcodec as an
+# optional accelerator and fall back when it is unusable.
+try:
+    import torchcodec
+
+    _TORCHCODEC_AVAILABLE = True
+except Exception:
+    torchcodec = None
+    _TORCHCODEC_AVAILABLE = False
 
 
 def to_hashable(path, idx, image_size):
@@ -49,9 +66,21 @@ class RmbData:
             self.enable_cache = enable_cache
             self.image_size = None if image_size is None else tuple(image_size)
 
+        def video_metadata(self):
+            """(num_frames, height, width) of this video.
+
+            Uses torchcodec's header parse when available, otherwise decodes
+            with videoio -- correct either way, just slower on the fallback
+            path, and only paid on shape/len queries rather than per frame.
+            """
+            if _TORCHCODEC_AVAILABLE:
+                metadata = torchcodec.decoders.VideoDecoder(self.path).metadata
+                return metadata.num_frames, metadata.height, metadata.width
+            frames = np.asarray(list(videoio.videoread(self.path)))
+            return frames.shape[0], frames.shape[1], frames.shape[2]
+
         def __len__(self):
-            decoder = torchcodec.decoders.VideoDecoder(self.path)
-            return decoder.metadata.num_frames
+            return self.video_metadata()[0]
 
         def __getitem__(self, idx):
             if self.enable_cache:
@@ -68,16 +97,28 @@ class RmbData:
 
     class RmbRgbVideo(RmbVideo):
         def _get_data(self, idx):
-            # torchcodec's VideoDecoder is slightly faster
-            # return videoio.videoread(self.path)[idx]
-            if self.path not in RmbData.RmbVideo._decoder_cache:
-                RmbData.RmbVideo._decoder_cache[self.path] = (
-                    torchcodec.decoders.VideoDecoder(
-                        self.path, dimension_order="NHWC"
+            # torchcodec's VideoDecoder is slightly faster, so prefer it and
+            # fall back to videoio when it could not be imported (see the
+            # import guard at the top of this module).
+            if _TORCHCODEC_AVAILABLE:
+                if self.path not in RmbData.RmbVideo._decoder_cache:
+                    RmbData.RmbVideo._decoder_cache[self.path] = (
+                        torchcodec.decoders.VideoDecoder(
+                            self.path, dimension_order="NHWC"
+                        )
                     )
-                )
-            decoder = RmbData.RmbVideo._decoder_cache[self.path]
-            data = decoder[idx].numpy()
+                decoder = RmbData.RmbVideo._decoder_cache[self.path]
+                data = decoder[idx].numpy()
+            else:
+                # videoio has no seek/random-access API, so the whole clip is
+                # decoded and indexed. Cache the decoded array rather than
+                # re-decoding per access -- without it this is far slower than
+                # torchcodec, not just "slightly".
+                if self.path not in RmbData.RmbVideo._decoder_cache:
+                    RmbData.RmbVideo._decoder_cache[self.path] = np.asarray(
+                        list(videoio.videoread(self.path))
+                    )
+                data = RmbData.RmbVideo._decoder_cache[self.path][idx]
             if self.image_size is not None:
                 if data.ndim == 3:  # (H, W, C)
                     data = cv2.resize(
@@ -105,14 +146,11 @@ class RmbData:
 
         @property
         def shape(self):
-            decoder = torchcodec.decoders.VideoDecoder(self.path)
-            if self.image_size is None:
-                height = decoder.metadata.height
-                width = decoder.metadata.width
-            else:
+            num_frames, height, width = self.video_metadata()
+            if self.image_size is not None:
                 width, height = self.image_size
             return (
-                decoder.metadata.num_frames,
+                num_frames,
                 height,
                 width,
                 3,
@@ -153,14 +191,11 @@ class RmbData:
 
         @property
         def shape(self):
-            decoder = torchcodec.decoders.VideoDecoder(self.path)
-            if self.image_size is None:
-                height = decoder.metadata.height
-                width = decoder.metadata.width
-            else:
+            num_frames, height, width = self.video_metadata()
+            if self.image_size is not None:
                 width, height = self.image_size
             return (
-                decoder.metadata.num_frames,
+                num_frames,
                 height,
                 width,
             )
