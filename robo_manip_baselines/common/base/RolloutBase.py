@@ -1,4 +1,5 @@
 import argparse
+import csv
 import datetime
 import os
 import pickle
@@ -41,7 +42,8 @@ from ..utils.DataUtils import (
     convert_data_to_policy,
     normalize_data,
 )
-from ..utils.MathUtils import set_random_seed
+from ..utils.EefPoseRetargetUtils import EpisodeRelativeEefPoseRetargeter
+from ..utils.MathUtils import get_pose_from_se3, get_se3_from_pose, set_random_seed
 from ..utils.MiscUtils import remove_prefix, remove_suffix
 from .PhaseBase import PhaseBase
 
@@ -67,6 +69,7 @@ class RolloutPhase(PhaseBase):
 
         self.op.rollout_time_idx = 0
         self.success_time = None
+        self.op.setup_eef_pose_retargeter()
         print(
             f"[{self.op.__class__.__name__}] Start policy rollout. Press the 'n' key to finish policy rollout."
         )
@@ -197,6 +200,23 @@ class RolloutBase(OperationDataMixin, ABC):
         self.data_manager.setup_camera_info()
         self.datetime_now = datetime.datetime.now()
         self.result = {key: [] for key in ("success", "reward", "duration")}
+
+        # Diagnostic CSV of the policy's predicted command for each action key
+        # (in the same physical units as the *_replay_log.csv files written by
+        # misc/ReplayUmiOnFairino5.py, so the two are directly comparable)
+        # alongside the measured state it was conditioned on. Always on: it's
+        # a small per-tick CSV write, independent of any real robot I/O.
+        self._policy_command_log_file = None
+        self._policy_command_log_writer = None
+
+        # Converts DataKey.MEASURED_EEF_POSE/COMMAND_EEF_POSE between the env's
+        # ABSOLUTE end-effector pose (what ArmManager's IK actually needs) and
+        # the EPISODE-RELATIVE convention UMI-collected training data uses for
+        # those same keys (see envs/real/umi/RealUMIEnvBase.py and
+        # misc/ReplayUmiOnFairino5.py's module docstring). None until
+        # setup_eef_pose_retargeter() runs at the start of each rollout
+        # episode; stays None (no-op) for policies that don't use these keys.
+        self._eef_pose_retargeter = None
 
         # Setup phase manager
         phase_order = [
@@ -502,6 +522,9 @@ class RolloutBase(OperationDataMixin, ABC):
 
         self.print_statistics()
 
+        if self._policy_command_log_file is not None:
+            self._policy_command_log_file.close()
+
         # self.env.close()
 
     def reset(self):
@@ -552,7 +575,7 @@ class RolloutBase(OperationDataMixin, ABC):
             state = np.concatenate(
                 [
                     convert_data_to_policy(
-                        self.motion_manager.get_data(state_key, self.obs), state_key
+                        self.get_measured_data_for_policy(state_key), state_key
                     )
                     for state_key in self.state_keys
                 ]
@@ -562,6 +585,32 @@ class RolloutBase(OperationDataMixin, ABC):
         state = torch.tensor(state[np.newaxis], dtype=torch.float32).to(self.device)
 
         return state
+
+    def get_measured_data_for_policy(self, state_key):
+        measured_data = self.motion_manager.get_data(state_key, self.obs)
+
+        if state_key == DataKey.MEASURED_EEF_POSE and self._eef_pose_retargeter is not None:
+            abs_se3 = get_se3_from_pose(measured_data)
+            rel_se3 = self._eef_pose_retargeter.to_episode_relative(abs_se3)
+            measured_data = get_pose_from_se3(rel_se3)
+
+        return measured_data
+
+    def setup_eef_pose_retargeter(self):
+        self._eef_pose_retargeter = None
+
+        if (DataKey.MEASURED_EEF_POSE not in self.state_keys) and (
+            DataKey.COMMAND_EEF_POSE not in self.action_keys
+        ):
+            return
+
+        # Reference pose the episode's own convention starts from (identity),
+        # matching how UMI-collected training data is recorded -- see
+        # EpisodeRelativeEefPoseRetargeter's docstring.
+        ref_se3 = get_se3_from_pose(
+            self.motion_manager.get_data(DataKey.MEASURED_EEF_POSE, self.obs)
+        )
+        self._eef_pose_retargeter = EpisodeRelativeEefPoseRetargeter(ref_se3)
 
     def get_images(self):
         # Assume all images are the same size
@@ -586,17 +635,85 @@ class RolloutBase(OperationDataMixin, ABC):
 
         is_skip = self.rollout_time_idx % self.args.skip != 0
         action_idx = 0
+        command_by_key = {}
         for key in action_keys:
             action_dim = DataKey.get_dim_for_policy(key, self.env)
             command = convert_data_from_policy(
                 self.policy_action[action_idx : action_idx + action_dim], key
             )
+            # Logged/kept in the policy's own episode-relative convention;
+            # motion_manager_command is what ArmManager's IK actually needs.
+            command_by_key[key] = command
+            motion_manager_command = command
+            if key == DataKey.COMMAND_EEF_POSE and self._eef_pose_retargeter is not None:
+                rel_se3 = get_se3_from_pose(command)
+                abs_se3 = self._eef_pose_retargeter.to_absolute(rel_se3)
+                motion_manager_command = get_pose_from_se3(abs_se3)
             self.motion_manager.set_command_data(
                 key,
-                command,
+                motion_manager_command,
                 is_skip,
             )
             action_idx += action_dim
+
+        self.log_policy_command_debug(command_by_key, is_skip)
+
+    # Column suffixes for keys whose physical meaning is worth naming
+    # explicitly (matches the *_replay_log.csv column names written by
+    # misc/ReplayUmiOnFairino5.py). Any other key falls back to numeric
+    # suffixes ("_0", "_1", ...).
+    _POLICY_COMMAND_LOG_SUFFIXES = {
+        DataKey.COMMAND_EEF_POSE: ["tx", "ty", "tz", "qw", "qx", "qy", "qz"],
+        DataKey.MEASURED_EEF_POSE: ["tx", "ty", "tz", "qw", "qx", "qy", "qz"],
+        DataKey.COMMAND_GRIPPER_JOINT_POS: ["pos"],
+        DataKey.MEASURED_GRIPPER_JOINT_POS: ["pos"],
+    }
+
+    def _policy_command_log_columns(self, key, dim):
+        suffixes = self._POLICY_COMMAND_LOG_SUFFIXES.get(key)
+        if suffixes is None or len(suffixes) != dim:
+            suffixes = [str(i) for i in range(dim)]
+        return [f"{key}_{suffix}" for suffix in suffixes]
+
+    def log_policy_command_debug(self, command_by_key, is_skip):
+        if len(command_by_key) == 0:
+            return
+
+        measured_by_key = {
+            key.replace("command_", "measured_", 1): self.get_measured_data_for_policy(
+                key.replace("command_", "measured_", 1)
+            )
+            for key in command_by_key
+        }
+
+        if self._policy_command_log_writer is None:
+            log_dir = "logs"
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(
+                log_dir,
+                f"policy_command_log_{self.policy_name}_{self.demo_name}_"
+                f"{self.datetime_now:%Y%m%d_%H%M%S}.csv",
+            )
+            self._policy_command_log_file = open(log_path, "w", newline="")
+            self._policy_command_log_writer = csv.writer(self._policy_command_log_file)
+            header = ["t", "rollout_time_idx", "is_skip"]
+            for key, command in command_by_key.items():
+                header += self._policy_command_log_columns(key, len(command))
+            for key, measured in measured_by_key.items():
+                header += self._policy_command_log_columns(key, len(measured))
+            self._policy_command_log_writer.writerow(header)
+            print(
+                f"[{self.__class__.__name__}] Logging policy command/measured "
+                f"state to {log_path}"
+            )
+
+        row = [self.env.unwrapped.get_time(), self.rollout_time_idx, is_skip]
+        for command in command_by_key.values():
+            row += [f"{v:.6f}" for v in command]
+        for measured in measured_by_key.values():
+            row += [f"{v:.6f}" for v in measured]
+        self._policy_command_log_writer.writerow(row)
+        self._policy_command_log_file.flush()
 
     def get_data_filename(self):
         filename = os.path.normpath(

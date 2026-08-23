@@ -21,3 +21,10 @@ pointcloud_camera_ids:
   hand: "CV2L3600005M"
 gripper_hand_type: "right"
 gripper_modbus_port: "/dev/ttyUSB0"
+
+# Diagnostic CSV: per-command joint positions at each stage (raw policy
+# output, after the safety hard-clip/velocity-clamp, after EMA smoothing,
+# and what was actually sent to ServoJ) alongside the measured position.
+# See log_command_for_safety_debug() in envs/real/RealEnvBase.py. A
+# timestamp is appended to the filename, so this is safe to leave on.
+command_log_path: "./logs/command_log.csv"

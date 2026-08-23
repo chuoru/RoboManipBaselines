@@ -506,6 +506,11 @@ class RealFairino5EnvBase(RealEnvBase):
             # actuating the arm/gripper. See _reset_robot()/move_to_init_pose().
             return
 
+        raw_command_deg_for_log = np.rad2deg(
+            action[self.body_config_list[0].arm_joint_idxes]
+        ).copy()
+        measured_deg_for_log = np.rad2deg(self.arm_joint_pos_actual).copy()
+
         # Overwrite duration or joint_pos for safety
         action, duration = self.overwrite_command_for_safety(
             action, duration, joint_vel_limit_scale
@@ -516,6 +521,7 @@ class RealFairino5EnvBase(RealEnvBase):
         gripper_percent_closed = float(
             action[self.body_config_list[0].gripper_joint_idxes][0]
         )
+        safety_command_deg_for_log = np.rad2deg(arm_joint_pos_command_rad).copy()
 
         # Smooth the commanded arm joint position with an exponential moving average
         # to reduce jerk from the input device's per-frame discretization and from
@@ -529,6 +535,16 @@ class RealFairino5EnvBase(RealEnvBase):
                 + (1.0 - alpha) * self._filtered_arm_joint_pos_command
             )
         arm_joint_pos_command_deg = np.rad2deg(self._filtered_arm_joint_pos_command)
+
+        self.log_command_for_safety_debug(
+            duration_arg=duration,
+            wait=wait,
+            measured_deg=measured_deg_for_log,
+            raw_command_deg=raw_command_deg_for_log,
+            safety_command_deg=safety_command_deg_for_log,
+            sent_deg=arm_joint_pos_command_deg,
+            gripper_percent_closed=gripper_percent_closed,
+        )
 
         # Convert numpy arrays to Python floats for XML-RPC compatibility
         joint_pos_list = [float(x) for x in arm_joint_pos_command_deg]
