@@ -205,8 +205,12 @@ class TrainBase(ABC):
         pass
 
     def setup_rmb_files(self):
+        # dedupe=True: a raw episode and its misc/FilterUmiTrackerSpikes.py
+        # "_clean" counterpart must not both count as independent episodes --
+        # see deduplicate_rmb_files's docstring for why (duplicated files can
+        # otherwise land on both sides of the train/val split below).
         self.all_filenames = find_rmb_files(
-            self.args.dataset_dir, num_files=self.args.num_data
+            self.args.dataset_dir, num_files=self.args.num_data, dedupe=True
         )
         random.shuffle(self.all_filenames)
 
