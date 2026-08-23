@@ -1,4 +1,5 @@
 import concurrent.futures
+import csv
 import os
 import re
 import sys
@@ -21,6 +22,12 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
     def __init__(
         self,
+        # Diagnostic CSV of every commanded joint position, at each stage of
+        # overwrite_command_for_safety/EMA smoothing, alongside the measured
+        # position -- see log_command_for_safety_debug(). None disables it.
+        # A timestamp is appended to the filename so repeated runs with the
+        # same config don't clobber each other's log.
+        command_log_path=None,
         **kwargs,
     ):
         # Setup environment parameters
@@ -32,11 +39,80 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         # clamp anchors on the measured position for that first command.
         self._prev_arm_joint_pos_command = None
 
+        self._command_log_file = None
+        self._command_log_writer = None
+        if command_log_path is not None:
+            root, ext = os.path.splitext(command_log_path)
+            timestamped_path = f"{root}_{time.strftime('%Y%m%d_%H%M%S')}{ext or '.csv'}"
+            log_dir = os.path.dirname(timestamped_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            self._command_log_file = open(timestamped_path, "w", newline="")
+            self._command_log_writer = csv.writer(self._command_log_file)
+            self._command_log_writer.writerow(
+                [
+                    "t",
+                    "duration",
+                    "wait",
+                    *[f"measured_deg_{i}" for i in range(6)],
+                    *[f"raw_command_deg_{i}" for i in range(6)],
+                    *[f"safety_command_deg_{i}" for i in range(6)],
+                    *[f"sent_deg_{i}" for i in range(6)],
+                    "gripper_percent_closed",
+                    "hit_hard_clip",
+                    "max_abs_sent_vs_measured_deg",
+                ]
+            )
+            self._command_log_file.flush()
+            print(
+                f"[{self.__class__.__name__}] Logging commanded/measured joint "
+                f"positions to {timestamped_path}"
+            )
+
         # Setup device variables
         self.cameras = {}
         self.pointcloud_cameras = {}
         self.rgb_tactiles = {}
         self.intensity_tactiles = {}
+
+    def log_command_for_safety_debug(
+        self,
+        duration_arg,
+        wait,
+        measured_deg,
+        raw_command_deg,
+        safety_command_deg,
+        sent_deg,
+        gripper_percent_closed,
+    ):
+        if self._command_log_writer is None:
+            return
+
+        hit_hard_clip = bool(
+            not np.allclose(raw_command_deg, safety_command_deg, atol=1e-6)
+        )
+        max_abs_sent_vs_measured_deg = float(np.max(np.abs(sent_deg - measured_deg)))
+        self._command_log_writer.writerow(
+            [
+                time.time() - self.init_time,
+                duration_arg,
+                wait,
+                *[f"{v:.4f}" for v in measured_deg],
+                *[f"{v:.4f}" for v in raw_command_deg],
+                *[f"{v:.4f}" for v in safety_command_deg],
+                *[f"{v:.4f}" for v in sent_deg],
+                f"{gripper_percent_closed:.2f}",
+                hit_hard_clip,
+                f"{max_abs_sent_vs_measured_deg:.4f}",
+            ]
+        )
+        self._command_log_file.flush()
+
+    def close_command_log(self):
+        if self._command_log_file is not None:
+            self._command_log_file.close()
+            self._command_log_file = None
+            self._command_log_writer = None
 
     def setup_realsense(self, camera_ids):
         if camera_ids is None:
@@ -359,6 +435,8 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 rgb_tactile.release()
             except Exception as e:
                 print(f"[{self.__class__.__name__}] Error releasing GelSight: {e}")
+
+        self.close_command_log()
 
     @abstractmethod
     def _reset_robot(self):

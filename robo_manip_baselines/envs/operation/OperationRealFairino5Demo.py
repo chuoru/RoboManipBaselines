@@ -39,6 +39,7 @@ class OperationRealFairino5Demo:
         gripper_do_open_id=1,
         observe_only=False,
         dry_run=False,
+        command_log_path=None,
     ):
         self.robot_ip = robot_ip
         self.camera_ids = camera_ids
@@ -51,6 +52,7 @@ class OperationRealFairino5Demo:
         self.gripper_do_open_id = gripper_do_open_id
         self.observe_only = observe_only
         self.dry_run = dry_run
+        self.command_log_path = command_log_path
         super().__init__()
 
     def setup_env(self, render_mode="human"):
@@ -67,6 +69,7 @@ class OperationRealFairino5Demo:
             gripper_do_open_id=self.gripper_do_open_id,
             observe_only=self.observe_only,
             dry_run=self.dry_run,
+            command_log_path=self.command_log_path,
         )
 
     def get_pre_motion_phases(self):

@@ -158,6 +158,7 @@ import yaml
 from robo_manip_baselines.common import (
     ArmManager,
     DataKey,
+    EpisodeRelativeEefPoseRetargeter,
     RmbData,
     get_pose_from_se3,
     get_se3_from_pose,
@@ -1416,8 +1417,6 @@ def main():
             f"-> {np.round(post_drift_range, 4)} m"
         )
 
-    umi_se3_0 = umi_se3_list[0]
-
     if args.sim:
         dry_run = False  # sim has no dry_run concept -- always "runs", just in MuJoCo
         print("[ReplayUmiOnFairino5] SIM MODE: replaying against MuJoCo FR5 (no hardware).")
@@ -1538,21 +1537,15 @@ def main():
     # exactly as it happened on the UMI rig, frame by frame. This only needs
     # the recorded pose sequence, not live UMI/Vive hardware, so it works
     # identically for offline replay.
-    target_se3_list = []
-    fr5_translation = init_se3.translation.copy()
-    prev_umi_se3 = umi_se3_0
-    for umi_se3_t in umi_se3_list:
-        delta_umi_rotation = umi_se3_0.rotation.T @ umi_se3_t.rotation
-        target_rotation = init_se3.rotation @ delta_umi_rotation
-
-        raw_translation_delta = umi_se3_t.translation - prev_umi_se3.translation
-        translation_delta_eef_local = umi_se3_t.rotation.T @ raw_translation_delta
-        fr5_translation = fr5_translation + pos_scale * (
-            target_rotation @ translation_delta_eef_local
-        )
-        prev_umi_se3 = umi_se3_t
-
-        target_se3_list.append(pin.SE3(target_rotation, fr5_translation.copy()))
+    # EpisodeRelativeEefPoseRetargeter.to_absolute() implements exactly this
+    # loop's math (right-multiply rotation composition onto init_se3, and
+    # per-frame local-increment translation re-accumulation) -- factored out
+    # so the same, single validated implementation is shared with online
+    # policy rollout (see RolloutBase.get_measured_data_for_policy/
+    # set_command_data in common/base/RolloutBase.py), rather than
+    # maintaining two copies that could silently drift apart.
+    retargeter = EpisodeRelativeEefPoseRetargeter(init_se3, pos_scale=pos_scale)
+    target_se3_list = [retargeter.to_absolute(umi_se3_t) for umi_se3_t in umi_se3_list]
 
     # Put the trajectory on the env's OWN control-period time grid before
     # replaying it. The recording's frame rate is not env.dt: one recorded
