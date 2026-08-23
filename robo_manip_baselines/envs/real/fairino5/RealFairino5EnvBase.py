@@ -85,6 +85,14 @@ class RealFairino5EnvBase(RealEnvBase):
         gripper_do_close_id=0,
         gripper_do_open_id=1,
         dry_run=False,
+        # Connect to the arm and open the cameras as normal, but never
+        # transmit a motion command: _motion_enabled stays False, so
+        # _set_action() returns before reaching ServoJ/SetToolDO. Use it to
+        # check that the observations a policy will consume (camera images,
+        # measured EEF pose, gripper state) are correct BEFORE letting that
+        # policy drive the hardware. Distinct from dry_run, which skips the
+        # robot connection AND the cameras, so it cannot validate either.
+        observe_only=False,
         command_smoothing_alpha=0.3,
         # ServoJ's own tuning knobs, exposed so they can be swept against real
         # hardware (see misc/TestFr5ServoJResponse.py) rather than being
@@ -104,6 +112,7 @@ class RealFairino5EnvBase(RealEnvBase):
         # Setup robot
         self.init_qpos = init_qpos
         self.dry_run = dry_run
+        self.observe_only = observe_only
         self.servoj_filter_t = servoj_filter_t
         self.servoj_gain = servoj_gain
         self.gripper_type = gripper_type
@@ -409,6 +418,20 @@ class RealFairino5EnvBase(RealEnvBase):
         ServoJ commands from the teleop loop. Intended to be called once, right
         before standby teleop begins (see MoveToInitPhase in
         OperationRealFairino5Demo.py)."""
+        if self.observe_only:
+            # Leave _motion_enabled False, so _set_action() returns before
+            # transmitting anything (see the gate there). Everything that only
+            # READS stays live: cameras, GetActualJointPosRadian, gripper DO
+            # state. That is the difference from dry_run, which never connects
+            # to the arm at all and never opens the cameras -- useless for
+            # checking that the observations a policy will see are correct.
+            print(
+                f"[{self.__class__.__name__}] OBSERVE-ONLY MODE: the arm will "
+                "NOT move and the gripper will NOT actuate. Commands are "
+                "computed and discarded; cameras and state readback are live."
+            )
+            return
+
         print(
             f"[{self.__class__.__name__}] Start moving the robot to the reset position."
         )

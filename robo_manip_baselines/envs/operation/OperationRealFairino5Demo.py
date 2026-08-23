@@ -37,6 +37,7 @@ class OperationRealFairino5Demo:
         gripper_type="tool_do",
         gripper_do_close_id=0,
         gripper_do_open_id=1,
+        observe_only=False,
         dry_run=False,
     ):
         self.robot_ip = robot_ip
@@ -48,6 +49,7 @@ class OperationRealFairino5Demo:
         self.gripper_type = gripper_type
         self.gripper_do_close_id = gripper_do_close_id
         self.gripper_do_open_id = gripper_do_open_id
+        self.observe_only = observe_only
         self.dry_run = dry_run
         super().__init__()
 
@@ -63,6 +65,7 @@ class OperationRealFairino5Demo:
             gripper_type=self.gripper_type,
             gripper_do_close_id=self.gripper_do_close_id,
             gripper_do_open_id=self.gripper_do_open_id,
+            observe_only=self.observe_only,
             dry_run=self.dry_run,
         )
 

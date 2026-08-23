@@ -1,0 +1,30 @@
+# Config for running a policy trained on UMI-collected demos
+# (RealUMIDemo) on the real FR5.
+#
+# Same as RealFairino5DemoEnv.yaml, except the hand camera is enabled: a
+# policy trained with `--camera_names hand` takes that camera's image as an
+# observation every step, and without it the env never populates
+# info["rgb_images"], so rollout dies with `KeyError: 'rgb_images'` the moment
+# the policy first tries to read an image.
+#
+# The camera and its serial MUST match what the demos were recorded with (see
+# envs/configs/RealUMIDemo.yaml) -- it is the same physical Orbbec camera,
+# moved from the UMI rig to the arm. A different camera, or the same one
+# mounted differently, changes the observation the policy was trained on.
+robot_ip: "192.168.57.2"
+# Orbbec Gemini, connected via pyorbbecsdk rather than pyrealsense2, so it
+# goes under pointcloud_camera_ids (see setup_femtobolt in
+# envs/real/RealEnvBase.py) keyed by serial number rather than device order.
+# List serials with:
+#   python ./third_party/pyorbbecsdk/examples/enumerate.py
+pointcloud_camera_ids:
+  hand: "CV2L3600005M"
+gripper_hand_type: "right"
+gripper_modbus_port: "/dev/ttyUSB0"
+
+# Never transmit a motion command: the arm stays exactly where it is and the
+# gripper never actuates, while cameras and state readback stay live. Use this
+# to confirm the observations the policy will consume (hand camera image,
+# measured EEF pose, gripper state) look right before letting it drive the
+# hardware. See observe_only in envs/real/fairino5/RealFairino5EnvBase.py.
+observe_only: true

@@ -8,6 +8,21 @@ from abc import ABC, abstractmethod
 
 import cv2
 import matplotlib
+
+# Select the Agg backend BEFORE importing pyplot, not just inside
+# setup_plot(). Every policy's Rollout*.py overrides setup_plot() to build its
+# own figure with plt.subplots() and pass it down to RolloutBase.setup_plot()
+# -- so that plt.subplots() call runs FIRST, and matplotlib.use("agg") there
+# is already too late. On a machine with a display, that first plt.subplots()
+# initializes matplotlib's default interactive (Qt) backend, which then
+# collides with the Qt that OpenCV loads for cv2.imshow: Qt reports
+# "QObject::moveToThread: Current thread is not the object's thread" and then
+# fails outright with "Could not load the Qt platform plugin xcb ... even
+# though it was found", aborting the process. Rollout never needs an
+# interactive figure anyway -- the figure is rasterized via FigureCanvasAgg
+# and displayed through cv2.imshow (see setup_plot below).
+matplotlib.use("agg")
+
 import matplotlib.pylab as plt
 import matplotlib.ticker as ticker
 import numpy as np
@@ -27,7 +42,7 @@ from ..utils.DataUtils import (
     normalize_data,
 )
 from ..utils.MathUtils import set_random_seed
-from ..utils.MiscUtils import remove_suffix
+from ..utils.MiscUtils import remove_prefix, remove_suffix
 from .PhaseBase import PhaseBase
 
 
@@ -601,9 +616,40 @@ class RolloutBase(OperationDataMixin, ABC):
             axes[camera_idx].imshow(self.info["rgb_images"][camera_name])
             axes[camera_idx].set_title(camera_name, fontsize=20)
 
+    def get_action_plot_labels(self):
+        """One label per action dimension, for plot_action's legend.
+
+        Names come from the action keys themselves, so the legend matches
+        whatever --action_keys the policy was trained with. Note the policy
+        dimension is not always the raw data dimension: an EEF pose is stored
+        as 7 (xyz + quaternion) but fed to the policy as 9 (xyz + 6D rotation),
+        which is what get_dim_for_policy reports and what these lines actually
+        are -- so a pose contributes labels xyz then rot0..rot5 rather than a
+        quaternion's wxyz.
+        """
+        labels = []
+        for key in self.action_keys:
+            dim = DataKey.get_dim_for_policy(key, self.env)
+            # Trim the redundant "command_"/"measured_" prefix; every action
+            # key carries the same one, so it only eats legend width.
+            name = remove_prefix(remove_prefix(key, "command_"), "measured_")
+            if key in (DataKey.MEASURED_EEF_POSE, DataKey.COMMAND_EEF_POSE):
+                num_eef = DataKey.get_num_eef(self.env)
+                per_eef = ["x", "y", "z"] + [f"rot{i}" for i in range(6)]
+                for eef_idx in range(num_eef):
+                    prefix = f"eef{eef_idx}_" if num_eef > 1 else ""
+                    labels += [f"{prefix}{component}" for component in per_eef]
+            elif dim == 1:
+                labels.append(name)
+            else:
+                labels += [f"{name}[{i}]" for i in range(dim)]
+        return labels
+
     def plot_action(self, ax):
         history_size = 100
-        ax.plot(self.policy_action_list[-1 * history_size :] * self.action_plot_scale)
+        lines = ax.plot(
+            self.policy_action_list[-1 * history_size :] * self.action_plot_scale
+        )
         ax.set_title("action", fontsize=20)
         ax.set_xlabel("step", fontsize=16)
         ax.set_xlim(0, history_size - 1)
@@ -612,6 +658,22 @@ class RolloutBase(OperationDataMixin, ABC):
         ax.tick_params(axis="x", labelsize=16)
         ax.tick_params(axis="y", labelsize=16)
         ax.axis("on")
+
+        # Without this the plot is an anonymous bundle of lines -- which one is
+        # the gripper, which is Z? Placed outside the axes so it never covers
+        # the traces, and multi-column so a 10-dim action stays readable.
+        labels = self.get_action_plot_labels()
+        if len(labels) == len(lines):
+            ax.legend(
+                lines,
+                labels,
+                fontsize=9,
+                loc="upper left",
+                bbox_to_anchor=(1.01, 1.0),
+                borderaxespad=0.0,
+                ncol=max(1, (len(labels) + 9) // 10),
+                framealpha=0.9,
+            )
 
     def print_statistics(self):
         print(f"[{self.__class__.__name__}] Statistics on policy inference")
