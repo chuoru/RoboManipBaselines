@@ -176,7 +176,7 @@ class RolloutDiffusionPolicy(RolloutBase):
         state = np.concatenate(
             [
                 convert_data_to_policy(
-                    self.motion_manager.get_data(state_key, self.obs), state_key
+                    self.get_measured_data_for_policy(state_key), state_key
                 )
                 for state_key in self.state_keys
             ]

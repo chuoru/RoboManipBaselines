@@ -28,3 +28,9 @@ gripper_modbus_port: "/dev/ttyUSB0"
 # measured EEF pose, gripper state) look right before letting it drive the
 # hardware. See observe_only in envs/real/fairino5/RealFairino5EnvBase.py.
 observe_only: true
+
+# Match the real rollout's control period (see
+# RealFairino5DemoEnv_UmiPolicy.yaml), so the images and states checked here
+# are sampled at the same cadence the policy will actually see them at.
+# Override from the command line with --time_scale.
+time_scale: 2.0

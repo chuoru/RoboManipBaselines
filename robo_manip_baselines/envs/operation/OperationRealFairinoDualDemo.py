@@ -14,6 +14,18 @@ class MoveToInitPhase(PhaseBase):
     def start(self):
         super().start()
         self.op.env.unwrapped.move_to_init_pose()
+        # move_to_init_pose() is a blocking MoveJ that happens OUTSIDE the
+        # env.step() loop, so op.obs still describes where the arms were
+        # before the move. Anything that re-anchors on the measured position
+        # from op.obs -- notably MotionManager.sync_arm_to_measured(), which
+        # RolloutBase.run() calls every tick -- would otherwise seed the IK
+        # with the PRE-move pose and command the arm straight back to it.
+        # Measured on the real FR5: a 13.8 deg step demanded on the very
+        # first tick after the move, executed at the full velocity-clamp
+        # limit -- a violent lurch the instant the rollout started. Refresh
+        # the observation here so the first post-move command starts from
+        # where the arms actually are.
+        self.op.obs = self.op.env.unwrapped._get_obs()
 
     def check_transition(self):
         return True  # move_to_init_pose() is blocking, so proceed immediately
