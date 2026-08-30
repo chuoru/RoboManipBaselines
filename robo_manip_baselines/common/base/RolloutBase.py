@@ -69,6 +69,13 @@ class RolloutPhase(PhaseBase):
 
         self.op.rollout_time_idx = 0
         self.success_time = None
+        # Round-trip completion tracking: these tasks are demonstrated as
+        # "leave the start pose, do the thing, come back", so in the
+        # episode-relative convention the finish looks like the start (both
+        # near the identity pose). Watching for depart-then-return is what
+        # tells a finished rollout from one that never started -- see
+        # check_transition().
+        self.has_departed = False
         self.op.setup_eef_pose_retargeter()
         print(
             f"[{self.op.__class__.__name__}] Start policy rollout. Press the 'n' key to finish policy rollout."
@@ -95,7 +102,43 @@ class RolloutPhase(PhaseBase):
         elapsed_duration = self.get_elapsed_duration()
 
         transition_flag = False
+        # Number of policy action steps consumed so far. infer_policy() pops
+        # one action every args.skip env steps (see pre_update above).
+        policy_step_idx = self.op.rollout_time_idx // self.op.args.skip
+
         if self.op.key == ord("n"):
+            transition_flag = True
+        elif self.op.check_task_finished(self):
+            print(
+                f"[{self.op.__class__.__name__}] Terminate the rollout phase "
+                "because the end-effector left the start pose and has now "
+                "returned to it -- the demonstrated round trip is complete."
+            )
+            transition_flag = True
+        elif (self.op.args.max_policy_steps is not None) and (
+            policy_step_idx >= self.op.args.max_policy_steps
+        ):
+            # A demonstration-trained policy has no notion of "done": it just
+            # keeps mapping observations to actions. For a task recorded as a
+            # round trip (reach, grasp, return), the end state is by
+            # construction close to the start state -- and for an
+            # episode-relative EEF convention it is *identical* by definition
+            # (both are the identity pose). So the policy reads the finished
+            # state as "start of episode" and cheerfully does the whole task
+            # again, forever. On real hardware nothing stops it: reward stays
+            # 0.0, so auto_exit's success path never fires either.
+            #
+            # Bound the rollout by how long the task actually took to
+            # demonstrate (model_meta_info's max_episode_len, in policy
+            # steps) instead -- see setup_model_meta_info().
+            print(
+                f"[{self.op.__class__.__name__}] Terminate the rollout phase "
+                f"because the policy step limit was reached "
+                f"({policy_step_idx} >= {self.op.args.max_policy_steps}). This "
+                "is a runaway guard, not a task-length estimate -- if the task "
+                "was still in progress, raise --max_policy_steps (or -1 to "
+                "disable) and check why it is running so slowly."
+            )
             transition_flag = True
         elif self.op.args.auto_exit:
             if (self.op.reward >= 1.0) and (self.success_time is None):
@@ -320,6 +363,56 @@ class RolloutBase(OperationDataMixin, ABC):
                 "(used only when '--auto_exit' option is enabled)"
             ),
         )
+        parser.add_argument(
+            "--time_scale",
+            type=float,
+            default=None,
+            help=(
+                "stretch the control period by this factor, slowing the whole "
+                "rollout uniformly (2.0 = half speed). Overrides the config "
+                "file's time_scale, so speeds can be swept without editing it. "
+                "This -- not the velocity clamp -- is the right way to slow a "
+                "closed-loop policy down: it scales the observation cadence and "
+                "the arm's speed together, leaving the spatial change the policy "
+                "sees between observations unchanged. Only environments that "
+                "accept time_scale honour this."
+            ),
+        )
+        parser.add_argument(
+            "--action_interp",
+            action="store_true",
+            help=(
+                "ramp the command between successive policy waypoints instead "
+                "of holding each for --skip env steps. Off by default: measured "
+                "on this stack it barely changed the commanded motion "
+                "(peak/median step 3.2 -> 3.1, no idle ticks either way, since "
+                "max_joint_pos_delta_deg already spreads each waypoint out) "
+                "while costing up to one hold window of lag. See "
+                "RolloutBase.get_interpolated_policy_action()."
+            ),
+        )
+        parser.add_argument(
+            "--no_auto_finish",
+            action="store_true",
+            help=(
+                "do not end the rollout when the end effector completes the "
+                "demonstrated round trip (leaves the start pose and returns "
+                "to it). See RolloutBase.check_task_finished()."
+            ),
+        )
+        parser.add_argument(
+            "--max_policy_steps",
+            type=int,
+            default=None,
+            help=(
+                "runaway guard: end the rollout phase after this many policy "
+                "action steps. NOT a task-length estimate -- normal completion "
+                "is detected by check_task_finished(). A closed-loop rollout "
+                "can need many times the demonstrated step count when the arm "
+                "lags its command. Default: the longest training episode's "
+                "length times MAX_POLICY_STEPS_MARGIN. Pass -1 to disable."
+            ),
+        )
 
         parser.add_argument(
             "--save_rollout",
@@ -401,6 +494,96 @@ class RolloutBase(OperationDataMixin, ABC):
         if self.args.skip_draw is None:
             self.args.skip_draw = self.args.skip
 
+        # Bound the rollout by the demonstrated task length unless told
+        # otherwise -- see RolloutPhase.check_transition() for why a policy
+        # with no "done" signal otherwise loops the task forever. Older
+        # checkpoints may predate max_episode_len being recorded; leave the
+        # limit off in that case rather than guessing.
+        if self.args.max_policy_steps is not None and self.args.max_policy_steps < 0:
+            self.args.max_policy_steps = None
+        elif self.args.max_policy_steps is None:
+            max_episode_len = self.model_meta_info["data"].get("max_episode_len")
+            if max_episode_len is None:
+                self.args.max_policy_steps = None
+                print(
+                    f"[{self.__class__.__name__}] model_meta_info has no "
+                    "max_episode_len, so the rollout is not length-limited. "
+                    "Pass --max_policy_steps to bound it."
+                )
+            else:
+                # Deliberately generous. This is a runaway guard, NOT an
+                # estimate of how long the task takes: a closed-loop rollout
+                # advances through the demonstrated trajectory far more slowly
+                # than the demonstration did whenever the arm lags its command
+                # (rate limits, contact, a cautious max_joint_pos_delta_deg),
+                # because the policy keeps re-planning from the state it
+                # actually observes. Measured on this rig: a task demonstrated
+                # in 85 policy steps needed >770 with a 0.5 deg/command cap.
+                # Sizing this to max_episode_len cut the task off before the
+                # arm had really started moving. Completion is detected
+                # directly instead -- see check_task_finished().
+                self.args.max_policy_steps = int(max_episode_len) * self.MAX_POLICY_STEPS_MARGIN
+
+        # Threshold scale for check_task_finished(), taken from how far the
+        # end effector actually travelled across the training demos.
+        self._eef_travel_scale = None
+        if DataKey.MEASURED_EEF_POSE in self.state_keys:
+            state_range = self.model_meta_info["state"].get("range")
+            if state_range is not None and len(state_range) >= 3:
+                # First three state entries are the EEF translation (see
+                # convert_data_to_policy / get_pose9_from_pose7).
+                self._eef_travel_scale = float(np.linalg.norm(state_range[:3]))
+
+    # Multiplier applied to the longest training episode to size the runaway
+    # guard -- see setup_model_meta_info().
+    MAX_POLICY_STEPS_MARGIN = 15
+
+    # check_task_finished() thresholds, as fractions of the EEF travel seen in
+    # training. Depart must be cleared before return is watched for, so a
+    # rollout that has not started yet is never mistaken for a finished one.
+    TASK_DEPART_FRACTION = 0.40
+    TASK_RETURN_FRACTION = 0.12
+    # Consecutive ticks the return condition must hold, so a trajectory that
+    # merely passes near the start pose does not end the rollout.
+    TASK_RETURN_HOLD_TICKS = 10
+
+    def check_task_finished(self, phase):
+        """True once the end effector has left the start pose and come back.
+
+        These tasks are demonstrated as a round trip, so in the
+        episode-relative convention a finished rollout looks exactly like an
+        unstarted one -- both sit at the identity pose. That ambiguity is why
+        the policy otherwise repeats the task forever (it reads the finished
+        state as "start of episode"). Requiring a departure first
+        disambiguates the two, and gives a real completion signal instead of
+        guessing a step count, which cannot work when execution speed varies
+        with how well the arm tracks its command.
+
+        Returns False (never terminates) when the episode-relative convention
+        is not in use, or when the training stats needed to size the
+        thresholds are unavailable.
+        """
+        if self.args.no_auto_finish:
+            return False
+        if self._eef_pose_retargeter is None or self._eef_travel_scale is None:
+            return False
+
+        rel_pose = self.get_measured_data_for_policy(DataKey.MEASURED_EEF_POSE)
+        displacement = float(np.linalg.norm(rel_pose[:3]))
+
+        if not phase.has_departed:
+            if displacement > self.TASK_DEPART_FRACTION * self._eef_travel_scale:
+                phase.has_departed = True
+                self._task_return_ticks = 0
+            return False
+
+        if displacement < self.TASK_RETURN_FRACTION * self._eef_travel_scale:
+            self._task_return_ticks = getattr(self, "_task_return_ticks", 0) + 1
+        else:
+            self._task_return_ticks = 0
+
+        return self._task_return_ticks >= self.TASK_RETURN_HOLD_TICKS
+
     @abstractmethod
     def setup_policy(self):
         pass
@@ -450,6 +633,9 @@ class RolloutBase(OperationDataMixin, ABC):
 
     def reset_variables(self):
         self.policy_action_list = np.empty((0, self.action_dim))
+        # Endpoints of the waypoint ramp -- see get_interpolated_policy_action().
+        self._interp_from = None
+        self._interp_to = None
 
     def get_pre_motion_phases(self):
         return []
@@ -484,6 +670,14 @@ class RolloutBase(OperationDataMixin, ABC):
             if self.reset_flag:
                 self.reset()
                 self.reset_flag = False
+
+            # Re-anchor the IK warm-start to the arm's actual measured
+            # position before computing this tick's command -- see
+            # ArmManager.sync_to_measured()'s docstring for why this must
+            # happen every tick on real hardware (prevents the commanded
+            # trajectory from winding up away from what the arm can actually
+            # follow under overwrite_command_for_safety's velocity clamp).
+            self.motion_manager.sync_arm_to_measured(self.obs)
 
             self.phase_manager.pre_update()
 
@@ -629,17 +823,76 @@ class RolloutBase(OperationDataMixin, ABC):
     def draw_plot(self):
         pass
 
+    def get_interpolated_policy_action(self):
+        """Policy action for this tick, ramped toward the current waypoint.
+
+        infer_policy() only advances the policy action once every args.skip
+        env steps, so the commanded pose is a staircase: it jumps to the new
+        waypoint, the arm converges on it well inside the hold window, and
+        then sits still until the next one. At the trained cadence the steps
+        are short enough not to matter, but they scale with --time_scale --
+        at 8.0 each waypoint is held for skip * 0.02 * 8 = 0.48 s, which is
+        plainly visible as move-stop-move-stop.
+
+        Ramping the command linearly from the previous waypoint to the
+        current one across the hold window turns that into continuous
+        motion. It costs up to one window of lag, which is exactly the
+        tradeoff that makes the motion smooth.
+
+        The rotation is interpolated in the policy's own 6D representation
+        and re-orthonormalised downstream by get_pose7_from_pose9(), so the
+        result is always a valid rotation. The gripper is deliberately NOT
+        interpolated: it is a binary tool-DO gripper here, and ramping the
+        commanded percentage would just smear its open/close edge.
+        """
+        if not self.args.action_interp:
+            return self.policy_action
+
+        skip = self.args.skip
+        if skip <= 1:
+            return self.policy_action
+
+        if self.rollout_time_idx % skip == 0:
+            # New waypoint this tick: ramp from wherever the last window
+            # finished (the previous waypoint), or from this one on the very
+            # first window, where there is nothing to ramp from.
+            self._interp_from = (
+                self.policy_action.copy()
+                if self._interp_to is None
+                else self._interp_to
+            )
+            self._interp_to = self.policy_action.copy()
+
+        if self._interp_to is None:
+            return self.policy_action
+
+        alpha = ((self.rollout_time_idx % skip) + 1) / skip
+        action = (1.0 - alpha) * self._interp_from + alpha * self._interp_to
+
+        # Keep non-pose components (gripper) on the un-ramped waypoint.
+        action_idx = 0
+        for key in self.action_keys:
+            action_dim = DataKey.get_dim_for_policy(key, self.env)
+            if key not in (DataKey.MEASURED_EEF_POSE, DataKey.COMMAND_EEF_POSE):
+                action[action_idx : action_idx + action_dim] = self._interp_to[
+                    action_idx : action_idx + action_dim
+                ]
+            action_idx += action_dim
+
+        return action
+
     def set_command_data(self, action_keys=None):
         if action_keys is None:
             action_keys = self.action_keys
 
         is_skip = self.rollout_time_idx % self.args.skip != 0
+        policy_action = self.get_interpolated_policy_action()
         action_idx = 0
         command_by_key = {}
         for key in action_keys:
             action_dim = DataKey.get_dim_for_policy(key, self.env)
             command = convert_data_from_policy(
-                self.policy_action[action_idx : action_idx + action_dim], key
+                policy_action[action_idx : action_idx + action_dim], key
             )
             # Logged/kept in the policy's own episode-relative convention;
             # motion_manager_command is what ArmManager's IK actually needs.

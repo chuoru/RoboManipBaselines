@@ -28,3 +28,58 @@ gripper_modbus_port: "/dev/ttyUSB0"
 # See log_command_for_safety_debug() in envs/real/RealEnvBase.py. A
 # timestamp is appended to the filename, so this is safe to leave on.
 command_log_path: "./logs/command_log.csv"
+
+# HOW TO SLOW THIS ROLLOUT DOWN: use time_scale, not joint_vel_limit_scale.
+#
+# time_scale stretches the control period, so the observation cadence and the
+# arm's speed slow down TOGETHER -- the spatial change the policy sees between
+# its two observation steps is unchanged from training, so the closed loop
+# stays consistent. 2.0 = half the speed the demos were performed at, matching
+# the --time_scale 2 that ReplayUmiOnFairino5.py needed for this same demo on
+# this arm.
+time_scale: 2.0
+
+# Safety net ONLY -- deliberately left with headroom so it almost never fires.
+#
+# Do NOT lower this to slow the arm down. The clamp throttles the command
+# without the policy knowing: the arm falls behind, the policy observes the
+# lagging state, replans a different trajectory, and the target reverses.
+# Measured on hardware at 15 deg/s against a policy demanding ~75 deg/s peak:
+# clamp firing on 43% of ticks, command-vs-measured error reaching 20 deg, and
+# the commanded joint angle flipping direction on ~50% of ticks -- fast,
+# jerky, oscillating motion that got WORSE the more the clamp was tightened.
+#
+# At time_scale 2.0 the policy's peak demand is ~37 deg/s, so 2.0 (60 deg/s)
+# leaves real headroom. Check a fresh command_log: hit_hard_clip should be
+# near 0. If it is not, raise time_scale rather than lowering this.
+joint_vel_limit_scale: 2.0
+
+# ABSOLUTE per-command joint motion limit [deg]. The arm can never move more
+# than this on any single ServoJ command, whatever else happens -- it is
+# enforced on the exact values transmitted, after the velocity clamp and the
+# EMA, and is NOT scaled by the loop period, so timing jitter cannot widen it.
+# This is what stops a rare action-chunk-boundary spike (measured up to 13.7
+# deg, ~340 deg/s) from being executed as one lurch: at 2.0 it is spread over
+# ~7 commands instead.
+#
+# Do NOT set this much lower without re-testing end to end. It is not a
+# "slower but otherwise equivalent" knob -- too tight a cap makes the command
+# lag so far behind that the policy observes states no demonstration ever
+# contained, and it stalls outright. Measured in dry run on this checkpoint:
+#   2.0 deg -> task completes in 65 policy steps (training took 85)
+#   0.5 deg -> arm reaches the target, then sits there; still 0.268 m from
+#              the start pose after 1499 policy steps, task never finishes
+max_joint_pos_delta_deg: 2.0
+
+# EMA smoothing on the commanded joint position (1.0 = off, lower = smoother
+# but laggier). Left at the long-standing 0.3.
+#
+# Measured at time_scale 2.0 -- stronger smoothing does NOT buy smoothness
+# here and costs completion, the same failure mode as too small a
+# max_joint_pos_delta_deg:
+#   0.30 -> task completes; step-size variation (std/mean) 0.77
+#   0.12 -> task NEVER completes;  variation 0.75 (i.e. no better)
+# The residual unevenness is in the policy's own commanded trajectory (rare
+# spikes that saturate max_joint_pos_delta_deg), not something a low-pass on
+# the joint command can remove. Raise time_scale to make it gentler.
+command_smoothing_alpha: 0.3

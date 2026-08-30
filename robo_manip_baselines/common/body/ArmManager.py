@@ -158,6 +158,31 @@ class ArmManager(BodyManagerBase):
             gripper_joint_pos += gripper_joint_pos_rel
         self.set_command_gripper_joint_pos(gripper_joint_pos)
 
+    def sync_to_measured(self, measured_arm_joint_pos):
+        """Re-anchor the IK warm-start (self.arm_joint_pos, hence current_se3
+        used by inverse_kinematics()'s error term) to the robot's actual
+        measured joint position.
+
+        Without this, self.arm_joint_pos only ever advances by integrating
+        successive IK corrections (see inverse_kinematics()) with no
+        connection to reality -- it assumes every previous correction was
+        fully, instantly achieved. On real hardware, overwrite_command_for_safety's
+        velocity clamp means that is usually false: whenever the commanded
+        motion is faster than the clamp allows through (a low
+        joint_vel_limit_scale, or a policy commanding fast motion),
+        self.arm_joint_pos races ahead of the real, rate-limited arm with
+        nothing pulling it back, so it diverges further every tick, and each
+        subsequent IK step is computed from an increasingly fictitious
+        "current" pose -- observed on the real FR5 as jerky, runaway-looking
+        motion that got WORSE when the velocity clamp was loosened, since the
+        real arm could then chase the (increasingly wrong) target harder.
+        misc/ReplayUmiOnFairino5.py avoids this by re-syncing to the real
+        measured joints every iteration; real-hardware control loops using
+        this class must do the same -- see RolloutBase.run().
+        """
+        self.arm_joint_pos = measured_arm_joint_pos
+        self.forward_kinematics()
+
     def set_command_eef_pose(self, eef_pose):
         if isinstance(eef_pose, pin.SE3):
             self.target_se3 = eef_pose

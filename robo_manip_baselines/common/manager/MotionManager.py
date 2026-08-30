@@ -22,6 +22,18 @@ class MotionManager:
         for body_manager in self.body_manager_list:
             body_manager.reset()
 
+    def sync_arm_to_measured(self, obs):
+        """Re-anchor every ArmManager's IK warm-start to the robot's actual
+        measured joint position -- see ArmManager.sync_to_measured() for why
+        this matters on real hardware."""
+        measured_joint_pos = self.env.unwrapped.get_joint_pos_from_obs(obs)
+        for body_manager in self.body_manager_list:
+            if not isinstance(body_manager, ArmManager):
+                continue
+            body_manager.sync_to_measured(
+                measured_joint_pos[body_manager.body_config.arm_joint_idxes]
+            )
+
     def set_command_data(self, key, command, is_skip=False):
         """Sets command data of the specified key."""
 

@@ -57,7 +57,7 @@ class RolloutGr00t(RolloutBase):
 
         return np.concatenate(
             [
-                self.motion_manager.get_data(state_key, self.obs)
+                self.get_measured_data_for_policy(state_key)
                 for state_key in self.state_keys
             ]
         ).astype(np.float32)[np.newaxis]

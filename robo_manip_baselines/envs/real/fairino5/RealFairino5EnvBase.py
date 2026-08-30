@@ -104,6 +104,13 @@ class RealFairino5EnvBase(RealEnvBase):
         # are the first thing to test when tracking is that poor.
         servoj_filter_t=0.0,
         servoj_gain=0.0,
+        # HARD per-command joint motion limit [deg], enforced on the exact
+        # values sent to ServoJ (see _set_action). None disables it. This is
+        # an absolute bound: it is not scaled by the loop period, so timing
+        # jitter cannot widen it, and it sits after every other limiter so it
+        # holds regardless of what they do. Use it to guarantee the arm can
+        # never lurch far enough in one command to damage what it is holding.
+        max_joint_pos_delta_deg=None,
         pointcloud_camera_ids=None,
         **kwargs,
     ):
@@ -115,6 +122,11 @@ class RealFairino5EnvBase(RealEnvBase):
         self.observe_only = observe_only
         self.servoj_filter_t = servoj_filter_t
         self.servoj_gain = servoj_gain
+        self.max_joint_pos_delta_deg = max_joint_pos_delta_deg
+        # Previously transmitted arm joint command [deg], the anchor for
+        # max_joint_pos_delta_deg. None = nothing sent since the last reset or
+        # out-of-stream move, so the next command anchors on the measurement.
+        self._last_sent_arm_joint_pos_deg = None
         self.gripper_type = gripper_type
         self.gripper_do_close_id = gripper_do_close_id
         self.gripper_do_open_id = gripper_do_open_id
@@ -403,6 +415,7 @@ class RealFairino5EnvBase(RealEnvBase):
         # phase, right before StandbyTeleopPhase begins.
         self._motion_enabled = False
         self._filtered_arm_joint_pos_command = None
+        self._last_sent_arm_joint_pos_deg = None
 
         if self.dry_run:
             self.arm_joint_pos_actual = np.array(
@@ -440,6 +453,14 @@ class RealFairino5EnvBase(RealEnvBase):
         # The arm is about to be moved by MoveJ, outside the ServoJ command
         # stream, so any previous anchor is stale -- see _reset_robot().
         self._prev_arm_joint_pos_command = None
+        # The blocking MoveJ below takes seconds; without clearing this the
+        # first post-move step() would measure that whole move as its control
+        # period and authorize a correspondingly large jump.
+        self._last_step_time = None
+        self._last_servoj_time = None
+        # MoveJ below repositions the arm outside the ServoJ stream, so the
+        # previous sent-command anchor is stale.
+        self._last_sent_arm_joint_pos_deg = None
 
         # Open the gripper BEFORE moving the arm, not after: if the gripper was
         # left closed around something from a previous session, moving the arm
@@ -535,6 +556,40 @@ class RealFairino5EnvBase(RealEnvBase):
                 + (1.0 - alpha) * self._filtered_arm_joint_pos_command
             )
         arm_joint_pos_command_deg = np.rad2deg(self._filtered_arm_joint_pos_command)
+
+        # LAST LINE OF DEFENCE: hard cap on how far any joint may move between
+        # two consecutive ServoJ commands. Applied here, on the exact values
+        # about to be transmitted, deliberately AFTER the velocity clamp and
+        # the EMA -- so it holds no matter what those did, and no matter how
+        # the loop period jittered. Unlike overwrite_command_for_safety's
+        # clamp it is not scaled by any measured duration, so a slow tick can
+        # never widen it.
+        #
+        # This exists because the policy's raw demand is not uniform: measured
+        # at time_scale 2.0 with the clamp disabled, 95% of ticks asked for
+        # <0.2 deg, but rare action-chunk boundaries asked for up to 13.7 deg
+        # in a single tick (~340 deg/s). Those spikes are what slam the arm.
+        # Capping spreads such a jump over consecutive commands instead of
+        # letting it through in one, while leaving normal motion untouched.
+        if self.max_joint_pos_delta_deg is not None:
+            if self._last_sent_arm_joint_pos_deg is None:
+                # Nothing sent yet this episode: anchor on where the arm
+                # actually is, so the first command cannot jump either.
+                self._last_sent_arm_joint_pos_deg = np.rad2deg(
+                    self.arm_joint_pos_actual
+                ).copy()
+            arm_joint_pos_command_deg = self._last_sent_arm_joint_pos_deg + np.clip(
+                arm_joint_pos_command_deg - self._last_sent_arm_joint_pos_deg,
+                -self.max_joint_pos_delta_deg,
+                self.max_joint_pos_delta_deg,
+            )
+            # Keep the EMA state consistent with what was actually sent,
+            # otherwise it keeps integrating toward the uncapped command and
+            # the cap silently turns into a permanent offset.
+            self._filtered_arm_joint_pos_command = np.deg2rad(
+                arm_joint_pos_command_deg
+            )
+        self._last_sent_arm_joint_pos_deg = arm_joint_pos_command_deg.copy()
 
         self.log_command_for_safety_debug(
             duration_arg=duration,
@@ -674,19 +729,19 @@ class RealFairino5EnvBase(RealEnvBase):
                 # traced to visibly jerky teleop motion. This does mean an
                 # out-of-band DO toggle (e.g. from a teach pendant) won't be
                 # reflected here, only DO changes this process itself sent.
-                try:
-                    if self._last_gripper_closing is None:
-                        raise RuntimeError("no gripper command sent yet")
+                if self._last_gripper_closing is None:
+                    # Nothing has been commanded yet this process. That is the
+                    # normal startup state -- env.step() runs from the very
+                    # first frame, while the first gripper command is not sent
+                    # until move_to_init_pose()/GraspPhase -- not a failure, so
+                    # do not report it. (It used to raise and print every tick,
+                    # flooding the console before the operator pressed 'n'.)
+                    gripper_percent_closed = self._last_gripper_percent_closed
+                else:
                     gripper_percent_closed = (
                         100.0 if self._last_gripper_closing else 0.0
                     )
                     self._last_gripper_percent_closed = gripper_percent_closed
-                except Exception as e:
-                    print(
-                        f"[{self.__class__.__name__}] Failed to read gripper DO state: "
-                        f"{e}. Using last known gripper position."
-                    )
-                    gripper_percent_closed = self._last_gripper_percent_closed
             gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
             gripper_joint_vel = np.zeros(1)
 

@@ -28,11 +28,62 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         # A timestamp is appended to the filename so repeated runs with the
         # same config don't clobber each other's log.
         command_log_path=None,
+        # Scales the per-step joint velocity clamp applied in step() (see
+        # overwrite_command_for_safety): effective limit is
+        # joint_vel_limit_scale * self.joint_vel_limit. Lower this to slow
+        # the arm's physical top speed WITHOUT changing --skip -- unlike
+        # --skip, this does not touch how often the policy observes/re-
+        # infers, so it does not distort the observation cadence the policy
+        # was trained on (see RolloutBase.infer_policy/model_meta_info's
+        # "skip"). 2.0 (the long-standing default before this was
+        # configurable) matches teleop's responsiveness; e.g. 0.5 caps the
+        # arm at 1/4 of that.
+        joint_vel_limit_scale=2.0,
+        # Stretches the control period (and with it the whole rollout) by
+        # this factor: 2.0 runs everything at half speed. This -- NOT
+        # joint_vel_limit_scale -- is the correct way to slow a closed-loop
+        # policy down.
+        #
+        # Throttling with the velocity clamp instead breaks the loop: the
+        # policy commands motion the clamp will not pass, the arm falls
+        # behind, the policy then observes that lagging state and replans a
+        # different trajectory, and the target reverses. Measured on the real
+        # FR5 with a 15 deg/s clamp against a policy demanding ~75 deg/s: the
+        # clamp fired on 43% of ticks, command-vs-measured reached 20 deg, and
+        # the commanded joint angle flipped direction on ~50% of ticks -- fast,
+        # jerky, oscillating motion.
+        #
+        # Stretching the period keeps the loop consistent instead. Both the
+        # observation spacing and the arm's speed scale together, so the
+        # SPATIAL change between the policy's n_obs_steps observations is
+        # unchanged from training (spacing s*dt at speed v/s gives the same
+        # v*dt displacement), which is what the policy actually conditions
+        # on. Same idea as ReplayUmiOnFairino5.py's --time_scale.
+        time_scale=1.0,
         **kwargs,
     ):
         # Setup environment parameters
         self.init_time = time.time()
-        self.dt = 0.02  # [s]
+        if time_scale <= 0.0:
+            raise ValueError(
+                f"[{self.__class__.__name__}] time_scale must be positive: {time_scale}"
+            )
+        self.time_scale = time_scale
+        self.dt = 0.02 * time_scale  # [s]
+        self.joint_vel_limit_scale = joint_vel_limit_scale
+        # Wall-clock time of the previous step(), used to measure the real
+        # control period for the velocity clamp. None means "no step since
+        # the last reset", in which case the nominal dt is used for that
+        # first step.
+        self._last_step_time = None
+        # Real elapsed control period used to scale the velocity clamp; see
+        # step() and overwrite_command_for_safety().
+        self._clamp_duration = None
+        # Gates command transmission. Subclasses that stream to hardware
+        # (e.g. RealFairino5EnvBase) own the normal enable/disable flow; it is
+        # defined here so overwrite_command_for_safety's abort path can shut
+        # motion off on any Real*Env, not just those that happen to define it.
+        self._motion_enabled = False
         self.world_random_scale = None
         # Anchor for the velocity clamp in overwrite_command_for_safety. None
         # means "no command issued since the last reset", in which case the
@@ -207,6 +258,11 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                     # image while a flaky camera is being reconnected, so a dropped
                     # camera doesn't crash or stall the teleop loop.
                     "last_result": None,
+                    # Wall-clock time the most recent frame arrived. Used to tell
+                    # "the loop is simply faster than the camera" (fine, reuse the
+                    # last frame) from "the camera has actually gone quiet"
+                    # (fault -> reconnect). See get_pointcloud_camera_data().
+                    "last_frame_time": None,
                     # True while a background reconnect attempt is in flight, to avoid
                     # piling up multiple concurrent reconnect threads for one camera.
                     "reconnecting": False,
@@ -276,6 +332,10 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
         pointcloud_camera["pipeline"] = pipeline
         pointcloud_camera["consecutive_failures"] = 0
+        # Restarting counts as "no frame received yet" for staleness purposes,
+        # so the fresh pipeline gets a full RECONNECT_TIMEOUT_SEC to deliver
+        # its first frame before being judged quiet again.
+        pointcloud_camera["last_frame_time"] = None
 
         # Drain any stale frames left in the queue from before a restart.
         while not pointcloud_camera["queue"].empty():
@@ -397,14 +457,80 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         # the arm OUTSIDE reset() (e.g. RealFairino5EnvBase.move_to_init_pose)
         # must clear it themselves as well.
         self._prev_arm_joint_pos_command = None
+        # Likewise drop the step-period anchor, so the first step of the new
+        # episode does not measure a "period" that spans the whole reset.
+        self._last_step_time = None
+        self._clamp_duration = None
 
         observation = self._get_obs()
         info = self._get_info()
 
         return observation, info
 
+    # Bounds on the measured control period used as the velocity clamp's
+    # duration below. The lower bound keeps a pair of unusually fast
+    # back-to-back steps from collapsing the allowed motion to ~0.
+    #
+    # The upper bound is a SAFETY limit on how much motion a single command
+    # may authorize, and must stay small. The clamp budgets this step's
+    # allowed motion from the PREVIOUS step's measured period, so an
+    # occasional slow tick (policy inference spike, camera/XML-RPC stall)
+    # hands the next command a correspondingly large allowance -- which the
+    # arm then executes as one lurch. Measured on hardware at 37 Hz with a
+    # 0.5s bound and a 30 deg/s limit: a 0.31s inference tick authorized a
+    # 9.4 deg single-step jump, and the log showed |sent - measured| peaking
+    # at 9.77 deg amid otherwise ~0.1 deg steps -- felt like a runaway.
+    # 0.1s bounds that worst case to 3 deg while still covering the normal
+    # loop period (~0.03s) with room to spare.
+    STEP_DURATION_MIN_SEC = 0.004
+    STEP_DURATION_MAX_SEC = 0.1
+
     def step(self, action):
-        self._set_action(action, duration=self.dt, joint_vel_limit_scale=2.0, wait=True)
+        # Measure the REAL elapsed control period rather than assuming the
+        # nominal self.dt. The loop's actual rate is not a stable self.dt:
+        # policy inference (tens to hundreds of ms, and only on the ticks
+        # where it runs), camera reads, and synchronous XML-RPC state
+        # readback all add jittery latency -- measured on this rig at
+        # 26ms..472ms against a nominal dt of 20ms.
+        #
+        # This duration is what overwrite_command_for_safety multiplies by
+        # the velocity limit to decide how far the command may move THIS
+        # tick. Passing the fixed self.dt while the real period is 5-20x
+        # longer starves every slow tick (it may only advance 20ms worth of
+        # motion no matter how long it actually took), so the commanded
+        # trajectory falls progressively behind and then lurches forward on
+        # the next fast tick -- exactly the "joint command spikes" /
+        # staircase jerk seen on hardware. RealFairino5EnvBase._set_action
+        # already derives ServoJ's own cmdT from measured elapsed time for
+        # the same reason; this keeps the safety clamp consistent with it.
+        # NOTE this is deliberately NOT passed as _set_action's `duration`:
+        # that argument doubles as the loop's pacing target (_set_action
+        # sleeps out the remainder of `duration` when wait=True). Feeding the
+        # measured period back in there is positive feedback -- each step
+        # sleeps until it is at least as long as the previous one, so the
+        # period ratchets upward until it pins at STEP_DURATION_MAX_SEC
+        # (observed: the loop collapsing to 2 Hz with the arm sitting still
+        # for 59% of ticks). The clamp reads it off self instead; `duration`
+        # stays the nominal dt so pacing is unchanged.
+        now = time.time()
+        if self._last_step_time is None:
+            self._clamp_duration = self.dt
+        else:
+            self._clamp_duration = float(
+                np.clip(
+                    now - self._last_step_time,
+                    self.STEP_DURATION_MIN_SEC,
+                    self.STEP_DURATION_MAX_SEC,
+                )
+            )
+        self._last_step_time = now
+
+        self._set_action(
+            action,
+            duration=self.dt,
+            joint_vel_limit_scale=self.joint_vel_limit_scale,
+            wait=True,
+        )
 
         observation = self._get_obs()
         reward = 0.0
@@ -451,6 +577,13 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
     # on normal servo lag, small enough to catch an arm that has actually
     # stopped following.
     joint_pos_tracking_error_warn_threshold = np.deg2rad(15.0)  # [rad]
+
+    # Hard stop. Past this much command-vs-measured error the command stream
+    # has demonstrably lost contact with the arm, and continuing to send
+    # targets it cannot reach is how a bad command turns into a runaway.
+    # Gate motion off and raise instead: no further ServoJ target is
+    # transmitted, so the arm holds wherever it currently is.
+    joint_pos_tracking_error_abort_threshold = np.deg2rad(30.0)  # [rad]
 
     def overwrite_command_for_safety(self, action, duration, joint_vel_limit_scale):
         arm_joint_idxes = np.concatenate(
@@ -521,7 +654,21 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 # actually is, so it cannot jump from an unknown state.
                 self._prev_arm_joint_pos_command = self.arm_joint_pos_actual.copy()
 
-            max_joint_pos_delta = scaled_joint_vel_limit * duration
+            # Scale the allowed per-step motion by how much time REALLY
+            # elapsed since the previous command, not by the nominal dt.
+            # The loop's actual period is not a stable self.dt (policy
+            # inference, camera reads and synchronous XML-RPC readback add
+            # tens to hundreds of ms, and only on some ticks), so budgeting
+            # every step as if it were dt starves the slow ticks: they may
+            # advance only dt's worth of motion no matter how long they
+            # actually took, the command falls behind, and the next fast tick
+            # lurches to catch up -- the staircase/jerk seen on hardware.
+            # `duration` itself is left alone because callers also use it as
+            # the loop's pacing target (see step()).
+            clamp_duration = getattr(self, "_clamp_duration", None)
+            if clamp_duration is None:
+                clamp_duration = duration
+            max_joint_pos_delta = scaled_joint_vel_limit * clamp_duration
             arm_joint_pos_command_overwritten = (
                 self._prev_arm_joint_pos_command
                 + np.clip(
@@ -542,6 +689,20 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                     arm_joint_pos_command_overwritten - self.arm_joint_pos_actual
                 )
             )
+            if tracking_error > self.joint_pos_tracking_error_abort_threshold:
+                # Stop transmitting before raising: _motion_enabled gates
+                # ServoJ/gripper output (see RealFairino5EnvBase._set_action),
+                # so the arm holds its last target instead of continuing to
+                # chase a command stream it has already lost.
+                self._motion_enabled = False
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}] ABORT: commanded joint "
+                    f"position is {np.rad2deg(tracking_error):.1f} deg ahead of "
+                    f"the measured position (limit "
+                    f"{np.rad2deg(self.joint_pos_tracking_error_abort_threshold):.0f} "
+                    "deg). Motion has been disabled and the arm is holding "
+                    "position. Reduce joint_vel_limit_scale before retrying."
+                )
             if tracking_error > self.joint_pos_tracking_error_warn_threshold:
                 print(
                     f"[{self.__class__.__name__}] WARNING: commanded joint "
@@ -656,9 +817,56 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         # attempt to restart the camera's pipeline, and meanwhile fall back to the
         # last successfully received frame so a flaky camera doesn't crash or stall
         # data collection.
+        #
+        # Do NOT block waiting for a *new* frame when a previous one is
+        # already in hand. The control loop calls _get_info() every step, so
+        # blocking here pins the whole loop to the camera's frame rate: with
+        # this rig's Orbbec running at 10 FPS, every env.step() waited ~100ms
+        # for a frame, the loop ran at exactly 10 Hz (measured dt median
+        # 0.100/0.101s across runs -- an externally clocked giveaway), and
+        # each ServoJ command therefore had to cover ~10x more motion than at
+        # the nominal 50 Hz. Large position steps at a low command rate are
+        # exactly the visible "joint angle jumps"/staircase motion. The
+        # policy only consumes an image every `skip` steps anyway, and a
+        # frame that is a few ms stale is harmless, so reuse the most recent
+        # frame and let the control loop run as fast as the robot I/O allows.
+        frames = None
         try:
-            frames = pointcloud_camera["queue"].get(timeout=self.RECONNECT_TIMEOUT_SEC)
+            # Drain to the NEWEST queued frame rather than taking the oldest:
+            # femtobolt_callback keeps up to 5, and consuming them one per
+            # step would feed the policy progressively staler images.
+            while True:
+                frames = pointcloud_camera["queue"].get_nowait()
         except Empty:
+            pass
+
+        now = time.time()
+        if frames is not None:
+            pointcloud_camera["last_frame_time"] = now
+        elif pointcloud_camera["last_result"] is not None:
+            # No new frame yet, but we have a recent one: this is the normal
+            # case when the loop outruns the camera. Only treat it as a fault
+            # once nothing has arrived for RECONNECT_TIMEOUT_SEC.
+            last_frame_time = pointcloud_camera.get("last_frame_time")
+            if (
+                last_frame_time is not None
+                and now - last_frame_time <= self.RECONNECT_TIMEOUT_SEC
+            ):
+                return pointcloud_camera_name, pointcloud_camera["last_result"]
+
+        if frames is None:
+            # Either no frame has ever arrived (startup -- wait for the first
+            # one), or the camera has gone quiet for longer than the timeout.
+            if pointcloud_camera["last_result"] is None:
+                try:
+                    frames = pointcloud_camera["queue"].get(
+                        timeout=self.RECONNECT_TIMEOUT_SEC
+                    )
+                    pointcloud_camera["last_frame_time"] = time.time()
+                except Empty:
+                    frames = None
+
+        if frames is None:
             pointcloud_camera["consecutive_failures"] += 1
             n = pointcloud_camera["consecutive_failures"]
             print(
