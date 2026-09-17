@@ -58,3 +58,10 @@ By default, the video separation times are automatically determined by detecting
 ```console
 --task_period_list 00:00.00-00:11.00 00:14.00-00:27.50 00:30.20-00:42.50 00:45.70-00:58.50 01:01.70-01:13.50 01:16.70-01:28.00
 ```
+
+## Insta360 utilities
+### Convert Insta360 recordings to MP4 and IMU CSV
+Convert every `.insv` file in a directory to a `.mp4` video (stream copy, no re-encode) and a `.csv` file of gyro/accelerometer samples (`timestamp_ms,sensor_type,x,y,z`). This does not stitch multi-lens recordings into a panoramic video (that requires Insta360's proprietary Media SDK); each `.insv` file is converted independently to its own raw fisheye-view mp4. Requires `pip install telemetry-parser` (or `pip install .[insta360]`) for IMU extraction; if a file's camera model isn't recognized by `telemetry-parser`, its CSV is skipped but the mp4 conversion still succeeds.
+```console
+$ python ./ConvertInsvToMp4AndImu.py --dataset_dir <insv_dir> [--output_dir <output_dir>] [--overwrite]
+```

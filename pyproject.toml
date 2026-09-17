@@ -135,6 +135,9 @@ benchmarks = [
   "python-pptx",
   "imageio-ffmpeg",
 ]
+insta360 = [
+  "telemetry-parser",
+]
 
 [tool.setuptools.packages.find]
 include = ["robo_manip_baselines", "robo_manip_baselines.*"]
