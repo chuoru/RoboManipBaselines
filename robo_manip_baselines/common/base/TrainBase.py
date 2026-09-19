@@ -11,8 +11,11 @@ from abc import ABC, abstractmethod
 
 import matplotlib
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# See RolloutBase.py for why the Agg backend must be selected before
+# importing pyplot.
+matplotlib.use("agg")
+
+import matplotlib.pylab as plt
 import numpy as np
 import psutil
 import torch
@@ -342,6 +345,15 @@ class TrainBase(ABC):
 
         # Setup tensorboard
         self.writer = SummaryWriter(self.args.checkpoint_dir)
+
+        # Setup CSV log and loss plot
+        os.makedirs(self.args.checkpoint_dir, exist_ok=True)
+        self.epoch_log_path = os.path.join(self.args.checkpoint_dir, "training_log.csv")
+        self.loss_curve_path = os.path.join(self.args.checkpoint_dir, "loss_curve.png")
+        self.loss_history = {"train": [], "val": []}
+        if not os.path.exists(self.epoch_log_path):
+            with open(self.epoch_log_path, "w", newline="") as f:
+                csv.writer(f).writerow(["epoch", "label", "metric", "value"])
 
         # Print dataset information
         self.print_dataset_info()
@@ -681,9 +693,30 @@ class TrainBase(ABC):
         for k, v in epoch_summary.items():
             self.writer.add_scalar(f"{k}/{label}", v, epoch)
 
-        self.loss_history[label].append(epoch_summary)
+        with open(self.epoch_log_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            for k, v in epoch_summary.items():
+                writer.writerow([epoch, label, k, v])
+
+        if "loss" in epoch_summary:
+            self.loss_history[label].append((epoch, epoch_summary["loss"]))
+            self.update_loss_plot()
 
         return epoch_summary
+
+    def update_loss_plot(self):
+        fig, ax = plt.subplots()
+        for label, history in self.loss_history.items():
+            if len(history) == 0:
+                continue
+            epochs, losses = zip(*history)
+            ax.plot(epochs, losses, label=label)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("loss")
+        ax.legend()
+        ax.grid(True)
+        fig.savefig(self.loss_curve_path)
+        plt.close(fig)
 
     def update_best_ckpt(self, epoch_summary, policy=None):
         if policy is None:
