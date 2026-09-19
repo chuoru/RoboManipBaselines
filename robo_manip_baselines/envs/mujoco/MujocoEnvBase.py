@@ -229,6 +229,11 @@ class MujocoEnvBase(EnvDataMixin, MujocoEnv, ABC):
         """Get names of tactile sensors with RGB output."""
         return []
 
+    @property
+    def rgb_camera_names(self):
+        """Get names of RGB-only (no depth) bridge-fed cameras, e.g. Insta360."""
+        return []
+
     def get_camera_fovy(self, camera_name):
         """Get vertical field-of-view of the camera."""
         return self.model.cam(self.cameras[camera_name]["name"]).fovy[0]

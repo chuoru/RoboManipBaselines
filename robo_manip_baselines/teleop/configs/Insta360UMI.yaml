@@ -1,0 +1,32 @@
+# Config for Insta360InputDevice on the UMI rig (see envs/configs/RealUMIDemo.yaml
+# for the matching insta360_ids socket path this must agree with).
+#
+# name/socket_path: must match one entry of insta360_ids in
+# envs/configs/RealUMIDemo.yaml (the same insta360_bridge process feeds both
+# the recorded camera image, via RealEnvBase.setup_insta360, and this pose
+# stream).
+device_params:
+  name: hand
+  socket_path: "/tmp/insta360_hand.sock"
+
+pos_scale: 1.0
+
+# PLACEHOLDER -- not yet calibrated against a real Insta360 mounting. Same
+# role as ViveInputDevice's vive_to_eef_frame_rotation/vive_to_eef_translation
+# (see that class's docstring and ViveUMI.yaml's comments); an equivalent
+# calibration procedure for this camera's actual mounting still needs to be
+# done (calibrate_vive_rotation.py's approach can likely be adapted).
+insta360_to_eef_frame_rotation:
+  - [1.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0]
+  - [0.0, 0.0, 1.0]
+insta360_to_eef_translation: [0.0, 0.0, 0.0]
+
+# The Insta360 camera has no physical trigger/button of its own (unlike the
+# Vive Tracker), so gripper control requires this keyboard fallback -- see
+# Insta360InputDevice's docstring. "z"/"x" matches KeyboardInputDevice's own
+# default binding.
+gripper_key_bindings:
+  gripper_close: z
+  gripper_open: x
+gripper_toggle: true

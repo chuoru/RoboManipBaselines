@@ -719,7 +719,14 @@ class RolloutBase(OperationDataMixin, ABC):
         if self._policy_command_log_file is not None:
             self._policy_command_log_file.close()
 
-        # self.env.close()
+        # Explicitly stop camera pipelines / robot connections before the
+        # interpreter starts finalizing objects in an arbitrary order (see
+        # RealEnvBase.close()). Without this, the process exit after a real
+        # rollout observably crashes with "malloc(): unaligned fastbin chunk
+        # detected" / SIGABRT, and leaves the Orbbec camera in a state where
+        # the next run's uvc_open fails until a USB reset. TeleopBase.run()
+        # already does this (see teleop/TeleopBase.py); Rollout never did.
+        self.env.close()
 
     def reset(self):
         # Reset plot

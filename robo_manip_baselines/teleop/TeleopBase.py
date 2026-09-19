@@ -6,6 +6,20 @@ import time
 from abc import ABC
 
 import cv2
+import matplotlib
+
+# Force a Tk-based backend, chosen BEFORE importing pyplot. cv2 (imported
+# just above) bundles its own Qt platform plugins and points
+# QT_QPA_PLATFORM_PLUGIN_PATH at them as a side effect of import; matplotlib
+# picking one of its own Qt-based backends (its default on many systems)
+# then tries to load a Qt platform plugin through that same, cv2-owned
+# path -- which can fail to load (silently downgrading every --plot_* flag
+# to a non-interactive, invisible Agg canvas: "FigureCanvasAgg is
+# non-interactive, and thus cannot be shown") or outright abort the process
+# ("Could not load the Qt platform plugin \"xcb\"", SIGABRT) depending on
+# the installed Qt/cv2 versions. TkAgg does not share any of cv2's Qt
+# machinery, so it is unaffected either way.
+matplotlib.use("TkAgg")
 import matplotlib.pylab as plt
 import numpy as np
 import yaml
@@ -254,6 +268,26 @@ class TeleopBase(OperationDataMixin, ABC):
                     "but no tactile sensor with intensity output was found."
                 )
 
+        if self.args.plot_weight:
+            if len(self.env.unwrapped.m5stack_scale_names) > 0:
+                plt.rcParams["keymap.quit"] = ["q", "escape"]
+                fig, self.ax_weight = plt.subplots(constrained_layout=True)
+            else:
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}] The '--plot_weight' option was specified "
+                    "but no M5Stack weight scale was found."
+                )
+
+        if self.args.plot_gripper_marker:
+            if getattr(self.env.unwrapped, "has_gripper_marker_tracking", False):
+                plt.rcParams["keymap.quit"] = ["q", "escape"]
+                fig, self.ax_gripper_marker = plt.subplots(constrained_layout=True)
+            else:
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}] The '--plot_gripper_marker' option "
+                    "was specified but no gripper_marker_config was found."
+                )
+
         # Setup input device
         if self.args.input_device_config is None:
             if self.args.input_device in ("gello", "vive"):
@@ -309,7 +343,7 @@ class TeleopBase(OperationDataMixin, ABC):
             "--input_device",
             type=str,
             default="spacemouse",
-            choices=["spacemouse", "keyboard", "gello", "vive"],
+            choices=["spacemouse", "keyboard", "gello", "vive", "insta360"],
             help="input device for teleoperation",
         )
         parser.add_argument(
@@ -329,6 +363,17 @@ class TeleopBase(OperationDataMixin, ABC):
             "--plot_tactile",
             action="store_true",
             help="whether to plot tactile sensor measurements",
+        )
+        parser.add_argument(
+            "--plot_weight",
+            action="store_true",
+            help="whether to plot M5Stack weight scale measurements",
+        )
+        parser.add_argument(
+            "--plot_gripper_marker",
+            action="store_true",
+            help="whether to plot the ArUco-marker-tracked gripper width (see "
+            "gripper_marker_config in envs/configs/RealUMIDemo.yaml)",
         )
 
         parser.add_argument(
@@ -504,6 +549,12 @@ class TeleopBase(OperationDataMixin, ABC):
             if self.args.plot_tactile:
                 self.draw_tactile()
 
+            if self.args.plot_weight:
+                self.draw_weight()
+
+            if self.args.plot_gripper_marker:
+                self.draw_gripper_marker()
+
             self.phase_manager.post_update()
 
             self.key = cv2.waitKey(1)
@@ -613,6 +664,10 @@ class TeleopBase(OperationDataMixin, ABC):
             self.env.unwrapped.camera_names
             + self.env.unwrapped.rgb_tactile_names
             + self.env.unwrapped.pointcloud_camera_names
+            + self.env.unwrapped.rgb_camera_names
+        )
+        no_depth_camera_names = (
+            self.env.unwrapped.rgb_tactile_names + self.env.unwrapped.rgb_camera_names
         )
         for camera_name in camera_name_list:
             rgb_image = self.info["rgb_images"][camera_name]
@@ -622,7 +677,7 @@ class TeleopBase(OperationDataMixin, ABC):
                 int(self.CAMERA_PANEL_WIDTH / image_ratio),
             )
             rgb_images.append(cv2.resize(rgb_image, resized_image_size))
-            if camera_name in self.env.unwrapped.rgb_tactile_names:
+            if camera_name in no_depth_camera_names:
                 depth_images.append(
                     np.full(resized_image_size[::-1] + (3,), 255, dtype=np.uint8)
                 )
@@ -795,6 +850,31 @@ class TeleopBase(OperationDataMixin, ABC):
                 vmax=vmax,
             )
             ax.set_title(tactile_name)
+        plt.draw()
+        plt.pause(0.001)
+
+    def draw_weight(self, vmax=500.0):
+        weight = self.motion_manager.get_data(DataKey.MEASURED_WEIGHT, self.obs)[0]
+        self.ax_weight.clear()
+        self.ax_weight.set_xlim(0, 1)
+        self.ax_weight.set_ylim(0, vmax)
+        self.ax_weight.bar(0.5, np.clip(weight, 0, vmax), width=0.6)
+        self.ax_weight.set_title(f"weight: {weight:.1f} g")
+        plt.draw()
+        plt.pause(0.001)
+
+    def draw_gripper_marker(self):
+        # Percent-closed (0 = open, 100 = closed), same convention as
+        # RealUMIEnvBase's gripper_joint_pos_actual / action_space -- see
+        # RealUMIEnvBase._estimate_gripper_percent_closed_from_markers().
+        percent_closed = self.motion_manager.get_data(
+            DataKey.MEASURED_GRIPPER_JOINT_POS, self.obs
+        )[0]
+        self.ax_gripper_marker.clear()
+        self.ax_gripper_marker.set_xlim(0, 1)
+        self.ax_gripper_marker.set_ylim(0, 100)
+        self.ax_gripper_marker.bar(0.5, np.clip(percent_closed, 0, 100), width=0.6)
+        self.ax_gripper_marker.set_title(f"gripper (marker): {percent_closed:.1f}%")
         plt.draw()
         plt.pause(0.001)
 

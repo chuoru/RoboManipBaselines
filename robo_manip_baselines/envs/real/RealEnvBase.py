@@ -2,6 +2,7 @@ import concurrent.futures
 import csv
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -13,6 +14,7 @@ import gymnasium as gym
 import numpy as np
 
 from robo_manip_baselines.common import ArmConfig, DataKey, EnvDataMixin
+from robo_manip_baselines.common import read_insta360_message
 
 
 class RealEnvBase(EnvDataMixin, gym.Env, ABC):
@@ -125,6 +127,8 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         self.pointcloud_cameras = {}
         self.rgb_tactiles = {}
         self.intensity_tactiles = {}
+        self.m5stack_scales = {}
+        self.rgb_cameras = {}
 
     def log_command_for_safety_debug(
         self,
@@ -195,9 +199,60 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
             self.cameras[camera_name] = camera
 
-    def setup_femtobolt(self, pointcloud_camera_ids):
+    def setup_femtobolt(
+        self,
+        pointcloud_camera_ids,
+        color_resolution=None,
+        color_exposure=None,
+        color_gain=None,
+    ):
+        """color_resolution: None (default) keeps the previous behavior --
+        request the sensor's default color profile and resize/deliver at
+        (640, 480), same as always. Pass (width, height, fps) -- e.g.
+        (1280, 800, 10), a resolution this camera was confirmed to support
+        via its color stream profile list -- to request that profile
+        instead and deliver frames at ITS native size with no further
+        resize, applied to every camera set up in this call.
+
+        Added for ArUco/AprilTag gripper-marker tracking
+        (RealUMIEnvBase._estimate_gripper_percent_closed_from_markers):
+        real-hardware testing found detection unreliable at the default
+        640x480 delivery size, and the actual bottleneck was marker pixel
+        footprint (measured ~4.3 px per tag module at 640x480, well under
+        the ~8-10 px/module AprilTag/ArUco detectors want for robust
+        decoding) rather than lighting/CLAHE tuning -- 1280x800 roughly
+        doubles that to ~8.5 px/module. This is a resolution the *sensor*
+        needs to actually support (see e.g.
+        third_party/pyorbbecsdk/examples/color.py to list a camera's own
+        supported color profiles); it is not a request that gets upscaled
+        artificially.
+
+        color_exposure/color_gain: None (default) leaves auto-exposure on,
+        as before. Pass both (e.g. color_exposure=40, color_gain=150 --
+        confirmed to still produce a usable, sharp image on this rig's
+        Orbbec Gemini 305, vs. its auto-exposure default of exposure=100
+        gain=16) to force a short, FIXED exposure time instead. Also added
+        for gripper-marker detection: auto-exposure lengthens exposure time
+        in dimmer rooms to keep brightness up, and a longer exposure means
+        any hand/gripper motion during that window smears into visible
+        motion blur -- which was measured to break marker decoding outright
+        even in a since-brightness-corrected, reasonably-lit frame (a
+        blurred marker's bit pattern is illegible regardless of overall
+        brightness/contrast). A short, capped exposure trades this for more
+        sensor noise (raising color_gain compensates the resulting
+        darkness) -- noise degrades a detector's bit-thresholding far less
+        than blur destroys the sharp edges it depends on. Applied to every
+        camera set up in this call; use
+        third_party/pyorbbecsdk's OBPropertyID.OB_PROP_COLOR_EXPOSURE_INT /
+        OB_PROP_COLOR_GAIN_INT ranges (device.get_int_property_range) to
+        find this camera's own valid min/max if retuning.
+        """
         if pointcloud_camera_ids is None:
             return
+
+        self._femtobolt_color_resolution = color_resolution
+        self._femtobolt_color_exposure = color_exposure
+        self._femtobolt_color_gain = color_gain
 
         sys.path.append(
             os.path.join(os.path.dirname(__file__), "../../../third_party/pyorbbecsdk")
@@ -297,10 +352,26 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         once -- if that instability comes back, disabling the depth
         enable_stream() call below (and reverting get_pointcloud_camera_data()'s
         depth extraction to the zero placeholder) is the known-stable fallback."""
-        from pyorbbecsdk import Config, OBSensorType, Pipeline
+        from pyorbbecsdk import Config, OBFormat, OBSensorType, Pipeline
 
         pointcloud_camera = self.pointcloud_cameras[pointcloud_camera_name]
         device = pointcloud_camera["device"]
+
+        color_exposure = getattr(self, "_femtobolt_color_exposure", None)
+        color_gain = getattr(self, "_femtobolt_color_gain", None)
+        if color_exposure is not None or color_gain is not None:
+            from pyorbbecsdk import OBPropertyID
+
+            # Manual exposure requires auto-exposure off first, or
+            # set_int_property(..._EXPOSURE_INT) is silently overridden by
+            # the auto-exposure loop on the next frame.
+            device.set_bool_property(OBPropertyID.OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, False)
+            if color_exposure is not None:
+                device.set_int_property(
+                    OBPropertyID.OB_PROP_COLOR_EXPOSURE_INT, color_exposure
+                )
+            if color_gain is not None:
+                device.set_int_property(OBPropertyID.OB_PROP_COLOR_GAIN_INT, color_gain)
 
         pipeline = Pipeline(device)
         config = Config()
@@ -310,7 +381,19 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 f"[{self.__class__.__name__}] Camera '{pointcloud_camera_name}' has no "
                 "color sensor."
             )
-        color_profile = color_profile_list.get_default_video_stream_profile()
+        color_resolution = getattr(self, "_femtobolt_color_resolution", None)
+        if color_resolution is None:
+            color_profile = color_profile_list.get_default_video_stream_profile()
+            pointcloud_camera["color_target_size"] = (640, 480)
+        else:
+            width, height, fps = color_resolution
+            color_profile = color_profile_list.get_video_stream_profile(
+                width, height, OBFormat.RGB, fps
+            )
+            pointcloud_camera["color_target_size"] = (
+                color_profile.get_width(),
+                color_profile.get_height(),
+            )
         config.enable_stream(color_profile)
 
         depth_profile_list = pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
@@ -440,6 +523,262 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
             self.intensity_tactiles[intensity_tactile_name] = intensity_tactile
 
+    # Baud rate of the M5Stack scale's serial protocol (see
+    # setup_m5stack_scale / _read_m5stack_scale_loop below).
+    M5STACK_SCALE_BAUDRATE = 115200
+
+    def setup_m5stack_scale(self, m5stack_ids):
+        """Connect to one or more M5Stack + load-cell weight-scale rigs over
+        USB serial (e.g. mounted on/near a UMI handheld gripper).
+
+        m5stack_ids: dict mapping a scale name to a substring of the
+        device's /dev/serial/by-id/* symlink (its USB serial number, stable
+        across replugs/reboots -- unlike /dev/ttyACM<N>'s enumeration index,
+        which can shift). Find it with `ls /dev/serial/by-id/`.
+
+        Each matched device is read in a background daemon thread (see
+        _read_m5stack_scale_loop) rather than inline in _get_obs(), so a
+        per-step serial readline() cannot add latency to the ~50 Hz control
+        loop -- the same reasoning as the femtobolt pointcloud camera's
+        queue/thread setup above. get_m5stack_scale_data() below just returns
+        the latest value the background thread has already parsed.
+        """
+        if m5stack_ids is None:
+            return
+
+        import serial
+
+        by_id_dir = "/dev/serial/by-id"
+        detected_device_names = (
+            os.listdir(by_id_dir) if os.path.isdir(by_id_dir) else []
+        )
+
+        for scale_name, m5stack_id in m5stack_ids.items():
+            device_path = None
+            for device_name in detected_device_names:
+                if m5stack_id in device_name:
+                    device_path = os.path.join(by_id_dir, device_name)
+                    break
+
+            if device_path is None:
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}] Specified M5Stack scale (name: "
+                    f"{scale_name}, ID: {m5stack_id}) not detected in {by_id_dir}. "
+                    f"Detected devices: {detected_device_names}"
+                )
+
+            connection = serial.Serial(
+                device_path, self.M5STACK_SCALE_BAUDRATE, timeout=1.0
+            )
+            print(
+                f"[{self.__class__.__name__}] Found M5Stack scale. name: "
+                f"{scale_name}, device: {device_path}"
+            )
+
+            scale = {
+                "connection": connection,
+                "lock": threading.Lock(),
+                "latest_weight": 0.0,
+                "last_update_time": None,
+                "stop_event": threading.Event(),
+            }
+            self.m5stack_scales[scale_name] = scale
+
+            thread = threading.Thread(
+                target=self._read_m5stack_scale_loop,
+                args=(scale_name,),
+                daemon=True,
+            )
+            scale["thread"] = thread
+            thread.start()
+
+    @staticmethod
+    def _parse_m5stack_weight(line):
+        """Parse one line of the M5Stack scale's serial protocol, e.g.:
+            b'[RUN] raw=-460395 weight=6.11 HR1=61 HR5=0 offset=-431515 scale=-4725.901855 state=0\\n'
+        Returns the weight in grams, or None if the line has no `weight=`
+        field (e.g. a startup/log line, or a garbled read)."""
+        try:
+            text = line.decode("ascii", errors="ignore")
+        except AttributeError:
+            text = line
+
+        for token in text.split():
+            if token.startswith("weight="):
+                try:
+                    return float(token[len("weight=") :])
+                except ValueError:
+                    return None
+
+        return None
+
+    def _read_m5stack_scale_loop(self, scale_name):
+        """Runs in a background daemon thread (see setup_m5stack_scale)."""
+        scale = self.m5stack_scales[scale_name]
+        connection = scale["connection"]
+        stop_event = scale["stop_event"]
+
+        while not stop_event.is_set():
+            try:
+                line = connection.readline()
+            except Exception as e:
+                print(
+                    f"[{self.__class__.__name__}] Error reading M5Stack scale "
+                    f"'{scale_name}': {e}"
+                )
+                stop_event.wait(0.1)
+                continue
+
+            if not line:
+                # readline() timed out (see M5STACK_SCALE_BAUDRATE's Serial()
+                # call above) with no newline received -- not itself a fault,
+                # just loop back and check stop_event.
+                continue
+
+            weight = self._parse_m5stack_weight(line)
+            if weight is None:
+                continue
+
+            with scale["lock"]:
+                scale["latest_weight"] = weight
+                scale["last_update_time"] = time.time()
+
+    def get_m5stack_scale_data(self, scale_name):
+        """Get the most recently received weight [g] from the named M5Stack
+        scale. Returns 0.0 if no reading has arrived yet since connecting."""
+        scale = self.m5stack_scales[scale_name]
+        with scale["lock"]:
+            return scale["latest_weight"]
+
+    @property
+    def m5stack_scale_names(self):
+        """Get names of connected M5Stack scales."""
+        return list(self.m5stack_scales.keys())
+
+    def setup_insta360(self, camera_ids):
+        """Connect to one or more Insta360 cameras via the insta360_bridge
+        helper process (see envs/real/insta360_bridge/) -- a separate C++
+        process that talks to the Insta360 CameraSDK and ORB-SLAM3, and
+        streams decoded RGB frames and estimated 6-DoF poses over a local
+        Unix domain socket (see common/utils/Insta360Protocol.py for the wire
+        format). This method only consumes "frame" messages, for the
+        rgb_cameras bucket below; Insta360InputDevice separately connects to
+        the same socket to consume "pose" messages.
+
+        camera_ids: dict mapping a camera name to the bridge's Unix domain
+        socket path for that camera, e.g. {"hand": "/tmp/insta360_hand.sock"}.
+
+        Like setup_femtobolt's pointcloud cameras, each camera is read in a
+        background daemon thread rather than inline in _get_info(), so a
+        stalled bridge/socket read cannot add latency to the ~50 Hz control
+        loop -- get_rgb_camera_data() below just returns the latest frame the
+        background thread has already received.
+        """
+        if camera_ids is None:
+            return
+
+        for camera_name, socket_path in camera_ids.items():
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.connect(socket_path)
+            print(
+                f"[{self.__class__.__name__}] Connected to Insta360 bridge. name: "
+                f"{camera_name}, socket: {socket_path}"
+            )
+
+            camera = {
+                "connection": connection,
+                "lock": threading.Lock(),
+                "latest_frame": None,
+                "last_update_time": None,
+                "stop_event": threading.Event(),
+            }
+            self.rgb_cameras[camera_name] = camera
+
+            thread = threading.Thread(
+                target=self._read_insta360_frame_loop,
+                args=(camera_name,),
+                daemon=True,
+            )
+            camera["thread"] = thread
+            thread.start()
+
+    def _read_insta360_frame_loop(self, camera_name):
+        """Runs in a background daemon thread (see setup_insta360)."""
+        camera = self.rgb_cameras[camera_name]
+        connection = camera["connection"]
+        stop_event = camera["stop_event"]
+
+        while not stop_event.is_set():
+            try:
+                message = read_insta360_message(connection)
+            except Exception as e:
+                if not stop_event.is_set():
+                    print(
+                        f"[{self.__class__.__name__}] Error reading Insta360 "
+                        f"bridge camera '{camera_name}': {e}"
+                    )
+                break
+
+            if message["type"] != "frame":
+                continue
+
+            with camera["lock"]:
+                camera["latest_frame"] = message["frame"]
+                camera["last_update_time"] = time.time()
+
+    def get_rgb_camera_data(self, camera_name, camera):
+        """Get the most recently received frame from the named Insta360
+        bridge camera, matching the {"rgb_images": ...} shape get_rgb_tactile_data
+        returns. Returns a black placeholder frame if no frame has arrived
+        yet since connecting."""
+        with camera["lock"]:
+            frame = camera["latest_frame"]
+        if frame is None:
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        return camera_name, {"rgb_images": frame}
+
+    @property
+    def rgb_camera_names(self):
+        """Get names of connected Insta360 (or other bridge-fed RGB-only) cameras."""
+        return list(self.rgb_cameras.keys())
+
+    def get_latest_rgb_camera_frame(self, camera_name):
+        """Get the most recently received frame for camera_name, checking
+        every camera bucket that maintains a cached "latest frame" --
+        rgb_cameras (see setup_insta360) and pointcloud_cameras (see
+        setup_femtobolt/Orbbec Gemini; used as an interim marker-tracking
+        source while insta360_bridge is not yet available, see
+        envs/real/insta360_bridge/README.md). Returns None if camera_name
+        isn't configured in either, or no frame has arrived yet.
+
+        Unlike get_rgb_camera_data/get_pointcloud_camera_data (used by
+        _get_info()'s per-step image bucket, which fall back to a
+        black/last-known placeholder so the dataset never has a missing
+        entry), this returns None in that case -- callers that need a REAL
+        frame to do vision processing on (e.g. ArUco gripper-marker
+        tracking) should treat None as "no estimate available this step",
+        not process a placeholder.
+
+        self.cameras (RealSense) is deliberately not checked here: unlike
+        the other two buckets it has no cached "latest frame" of its own
+        (each read is a live, uncached hardware call), so returning one
+        here would mean a SECOND live grab beyond what _get_info() already
+        does that step -- redundant, and not comparable in freshness to the
+        other two buckets' semantics.
+        """
+        rgb_camera = self.rgb_cameras.get(camera_name)
+        if rgb_camera is not None:
+            with rgb_camera["lock"]:
+                return rgb_camera["latest_frame"]
+
+        pointcloud_camera = self.pointcloud_cameras.get(camera_name)
+        if pointcloud_camera is not None:
+            last_result = pointcloud_camera.get("last_result")
+            if last_result is not None:
+                return last_result.get("rgb_images")
+
+        return None
+
     def get_input_device_kwargs(self, input_device_name):
         return {}
 
@@ -561,6 +900,36 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 rgb_tactile.release()
             except Exception as e:
                 print(f"[{self.__class__.__name__}] Error releasing GelSight: {e}")
+
+        for scale_name, scale in self.m5stack_scales.items():
+            scale["stop_event"].set()
+            scale["thread"].join(timeout=1.0)
+            try:
+                scale["connection"].close()
+            except Exception as e:
+                print(
+                    f"[{self.__class__.__name__}] Error closing M5Stack scale "
+                    f"'{scale_name}': {e}"
+                )
+
+        for camera_name, camera in self.rgb_cameras.items():
+            camera["stop_event"].set()
+            try:
+                # Unblock a thread parked in a blocking recv() on this socket
+                # -- unlike the M5Stack scale's readline() (which has its own
+                # 1.0s timeout), Insta360Protocol.read_message() has no
+                # timeout of its own, so closing alone would not wake it.
+                camera["connection"].shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            camera["thread"].join(timeout=1.0)
+            try:
+                camera["connection"].close()
+            except Exception as e:
+                print(
+                    f"[{self.__class__.__name__}] Error closing Insta360 bridge "
+                    f"camera '{camera_name}': {e}"
+                )
 
         self.close_command_log()
 
@@ -738,6 +1107,7 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             + len(self.pointcloud_camera_names)
             + len(self.rgb_tactile_names)
             + len(self.intensity_tactile_names)
+            + len(self.rgb_camera_names)
             == 0
         ):
             return info
@@ -783,6 +1153,13 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                         intensity_tactile,
                     )
                 ] = intensity_tactile_name
+
+            for rgb_camera_name, rgb_camera in self.rgb_cameras.items():
+                futures[
+                    executor.submit(
+                        self.get_rgb_camera_data, rgb_camera_name, rgb_camera
+                    )
+                ] = rgb_camera_name
 
             for future in concurrent.futures.as_completed(futures):
                 name, result = future.result()
@@ -931,7 +1308,8 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
                 f"[{self.__class__.__name__}] Unsupported rgb format in pointcloud camera: {rgb_format}"
             )
         rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
-        rgb_image = cv2.resize(rgb_image, (640, 480))
+        color_target_size = pointcloud_camera.get("color_target_size", (640, 480))
+        rgb_image = cv2.resize(rgb_image, color_target_size)
 
         # The depth stream is enabled in _start_femtobolt_pipeline(). Convert the
         # raw Y16 depth (device-native units, typically mm) to meters, matching
@@ -951,7 +1329,7 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             depth_data = depth_data.reshape((depth_height, depth_width))
             depth_image = 1e-3 * depth_scale * depth_data.astype(np.float32)  # [m]
             depth_image = cv2.resize(
-                depth_image, (640, 480), interpolation=cv2.INTER_NEAREST
+                depth_image, color_target_size, interpolation=cv2.INTER_NEAREST
             )
 
         result = {
@@ -1036,6 +1414,10 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
     def get_eef_wrench_from_obs(self, obs):
         """Get end-effector wrench (fx, fy, fz, nx, ny, nz) from observation."""
         return obs["wrench"]
+
+    def get_weight_from_obs(self, obs):
+        """Get measured weight [g] from an external scale (e.g. M5Stack) from observation."""
+        return obs["weight"]
 
     def get_time(self):
         """Get real-world time. [s]"""

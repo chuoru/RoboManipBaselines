@@ -4,5 +4,6 @@ from .KeyboardInputDevice import KeyboardInputDevice
 from .SpacemouseMobileInputDevice import SpacemouseMobileInputDevice
 from .GelloInputDevice import GelloInputDevice
 from .ViveInputDevice import ViveInputDevice
+from .Insta360InputDevice import Insta360InputDevice
 from .TeleopBase import TeleopBase
 from .TeleopBaseVec import TeleopBaseVec

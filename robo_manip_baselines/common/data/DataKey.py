@@ -67,6 +67,11 @@ class DataKey:
     # Command velocity of omni-directional mobile base
     COMMAND_MOBILE_OMNI_VEL = "command_mobile_omni_vel"
 
+    # Measured weight [g] from an external scale (e.g. an M5Stack + load-cell
+    # rig mounted on/near a handheld gripper such as UMI). Scalar; there is no
+    # command counterpart, as this is a passive sensor reading.
+    MEASURED_WEIGHT = "measured_weight"
+
     # All keys of measured data
     MEASURED_DATA_KEYS = [
         MEASURED_JOINT_POS,
@@ -80,6 +85,7 @@ class DataKey:
         # MEASURED_EEF_VEL,
         MEASURED_EEF_WRENCH,
         MEASURED_MOBILE_OMNI_VEL,
+        MEASURED_WEIGHT,
     ]
 
     # All keys of command data
@@ -161,6 +167,8 @@ class DataKey:
                 return 6 * num_eef
         elif key in (DataKey.MEASURED_MOBILE_OMNI_VEL, DataKey.COMMAND_MOBILE_OMNI_VEL):
             return 3
+        elif key == DataKey.MEASURED_WEIGHT:
+            return 1
         else:
             raise ValueError(f"[{cls.__name__}] Invalid data key: {key}")
 

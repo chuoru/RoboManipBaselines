@@ -58,6 +58,11 @@ class OperationDataMixin:
                 DataKey.get_rgb_image_key(rgb_tactile_name),
                 self.info["rgb_images"][rgb_tactile_name],
             )
+        for rgb_camera_name in self.env.unwrapped.rgb_camera_names:
+            self.data_manager.append_single_data(
+                DataKey.get_rgb_image_key(rgb_camera_name),
+                self.info["rgb_images"][rgb_camera_name],
+            )
         for pointcloud_camera_name in self.env.unwrapped.pointcloud_camera_names:
             self.data_manager.append_single_data(
                 DataKey.get_rgb_image_key(pointcloud_camera_name),

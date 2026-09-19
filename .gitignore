@@ -15,3 +15,5 @@ GTAGS
 
 .codex
 robo_manip_baselines/logs
+robo_manip_baselines/gripper_marker_snapshots
+robo_manip_baselines/Log

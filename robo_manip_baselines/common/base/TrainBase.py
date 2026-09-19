@@ -1,12 +1,18 @@
 import argparse
 import copy
+import csv
 import datetime
+import json
 import os
 import pickle
 import random
 import sys
 from abc import ABC, abstractmethod
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import psutil
 import torch
@@ -51,8 +57,12 @@ class TrainBase(ABC):
         parser.add_argument(
             "--dataset_dir",
             type=str,
+            nargs="+",
             required=True,
-            help="dataset directory",
+            help="one or more dataset directories. Episodes from all of them "
+            "are pooled into a single training/validation split. --num_data, "
+            "if given, is applied to EACH directory individually (not to the "
+            "combined total).",
         )
         parser.add_argument(
             "--checkpoint_dir",
@@ -161,6 +171,32 @@ class TrainBase(ABC):
             default=0.0,
             help="Scale of affine random noise added to the images",
         )
+        parser.add_argument(
+            "--data_augmentation",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Enable a preset of data augmentation (state/action/image noise "
+            "plus random erasing/color-jitter/affine on images). Only fills in "
+            "individual --*_aug_std / --*_aug_*_scale options that are still at "
+            "their default value of 0.0 (or the policy's own default); options "
+            "explicitly set on the command line are left untouched.",
+        )
+
+        parser.add_argument(
+            "--early_stopping_patience",
+            type=int,
+            default=None,
+            help="Number of consecutive epochs without improvement in "
+            "validation loss after which training stops early (default: "
+            "None, i.e. early stopping disabled and all --num_epochs are run)",
+        )
+        parser.add_argument(
+            "--early_stopping_min_delta",
+            type=float,
+            default=0.0,
+            help="Minimum decrease in validation loss to be considered an "
+            "improvement, used only when --early_stopping_patience is set",
+        )
 
         parser.add_argument(
             "--skip",
@@ -184,9 +220,12 @@ class TrainBase(ABC):
             argv = sys.argv
         self.args = parser.parse_args(argv[1:])
 
+        if self.args.data_augmentation:
+            self.apply_data_augmentation_presets()
+
         # Set checkpoint directory if it is not specified
         if self.args.checkpoint_dir is None:
-            dataset_dirname = os.path.basename(os.path.normpath(self.args.dataset_dir))
+            dataset_dirname = self.get_combined_dataset_name()
             checkpoint_dirname = "{}_{}_{:%Y%m%d_%H%M%S}".format(
                 dataset_dirname, self.policy_name, datetime.datetime.now()
             )
@@ -204,20 +243,55 @@ class TrainBase(ABC):
     def set_additional_args(self, parser):
         pass
 
+    def apply_data_augmentation_presets(self):
+        """Fill in a reasonable default augmentation strength for options
+        that are still at their default value of 0.0 (i.e. not explicitly
+        set on the command line and not overridden by the policy's own
+        set_additional_args). This lets --data_augmentation turn on a
+        sensible augmentation preset with a single flag."""
+        presets = {
+            "state_aug_std": 0.01,
+            "action_aug_std": 0.01,
+            "image_aug_std": 0.01,
+            "image_aug_erasing_scale": 1.0,
+            "image_aug_color_scale": 1.0,
+            "image_aug_affine_scale": 1.0,
+        }
+        for key, value in presets.items():
+            if getattr(self.args, key) == 0.0:
+                setattr(self.args, key, value)
+
+    def get_combined_dataset_name(self):
+        """Human-readable name for --dataset_dir, used for the checkpoint
+        directory and recorded into model_meta_info. Multiple directories are
+        joined with '+' so a combined-dataset run is identifiable at a glance
+        (e.g. in the checkpoint directory listing) instead of silently taking
+        on just the first directory's name."""
+        return "+".join(
+            os.path.basename(os.path.normpath(d)) for d in self.args.dataset_dir
+        )
+
     def setup_rmb_files(self):
         # dedupe=True: a raw episode and its misc/FilterUmiTrackerSpikes.py
         # "_clean" counterpart must not both count as independent episodes --
         # see deduplicate_rmb_files's docstring for why (duplicated files can
-        # otherwise land on both sides of the train/val split below).
-        self.all_filenames = find_rmb_files(
-            self.args.dataset_dir, num_files=self.args.num_data, dedupe=True
-        )
+        # otherwise land on both sides of the train/val split below). Applied
+        # per directory: dedup only ever needs to match a file against its
+        # own "_clean" counterpart, which is always in the same directory, so
+        # deduping each directory's own file list separately (rather than
+        # pooling first) gives the same result and lets --num_data below
+        # apply per directory rather than to an already-merged list.
+        self.all_filenames = []
+        for dataset_dir in self.args.dataset_dir:
+            self.all_filenames += find_rmb_files(
+                dataset_dir, num_files=self.args.num_data, dedupe=True
+            )
         random.shuffle(self.all_filenames)
 
     def setup_model_meta_info(self):
         self.model_meta_info = {
             "data": {
-                "name": os.path.basename(os.path.normpath(self.args.dataset_dir)),
+                "name": self.get_combined_dataset_name(),
                 "skip": self.args.skip,
             },
             "policy": {"name": self.policy_name},
@@ -420,7 +494,7 @@ class TrainBase(ABC):
 
     def print_dataset_info(self):
         print(
-            f"[{self.__class__.__name__}] Load dataset from {self.args.dataset_dir}\n"
+            f"[{self.__class__.__name__}] Load dataset from {', '.join(self.args.dataset_dir)}\n"
             f"  - train size: {len(self.train_dataloader.dataset)}, files: {len(self.train_dataloader.dataset.filenames)}\n"
             f"  - val size: {len(self.val_dataloader.dataset)}, files: {len(self.val_dataloader.dataset.filenames)}\n"
             f"  - episode len mean: {int(self.model_meta_info['data']['mean_episode_len'])}, min: {self.model_meta_info['data']['min_episode_len']}, max: {self.model_meta_info['data']['max_episode_len']}"
@@ -476,16 +550,110 @@ class TrainBase(ABC):
             f"[{self.__class__.__name__}] Save model meta info: {model_meta_info_path}"
         )
 
+        # Save hyperparameters in a human-readable form
+        self.save_hyperparams()
+
         # Train loop
         print(
             f"[{self.__class__.__name__}] Train with saving checkpoints: {self.args.checkpoint_dir}"
         )
         self.best_ckpt_info = {"loss": np.inf, "epoch": -1}
+        self.loss_history = {"train": [], "val": []}
+        self.early_stop_counter = 0
+        self.early_stop_best_loss = np.inf
         self.train_loop()
+
+        # Save loss curve
+        self.save_loss_curve()
 
     @abstractmethod
     def train_loop(self):
         pass
+
+    def save_hyperparams(self):
+        hparams_path = os.path.join(self.args.checkpoint_dir, "hyperparams.json")
+        with open(hparams_path, "w") as f:
+            json.dump(vars(self.args), f, indent=2, default=str)
+        print(f"[{self.__class__.__name__}] Save hyperparameters: {hparams_path}")
+
+    def check_early_stop(self, epoch_summary):
+        """Called with the validation epoch summary. Returns True once
+        validation loss has not improved by at least
+        --early_stopping_min_delta for --early_stopping_patience
+        consecutive epochs; always False when --early_stopping_patience is
+        not set."""
+        if self.args.early_stopping_patience is None:
+            return False
+
+        if (
+            epoch_summary["loss"]
+            < self.early_stop_best_loss - self.args.early_stopping_min_delta
+        ):
+            self.early_stop_best_loss = epoch_summary["loss"]
+            self.early_stop_counter = 0
+        else:
+            self.early_stop_counter += 1
+
+        if self.early_stop_counter >= self.args.early_stopping_patience:
+            print(
+                f"[{self.__class__.__name__}] Early stopping at epoch "
+                f"{epoch_summary['epoch']} (no val loss improvement for "
+                f"{self.args.early_stopping_patience} epochs)"
+            )
+            return True
+
+        return False
+
+    def save_loss_curve(self):
+        train_history = self.loss_history["train"]
+        val_history = self.loss_history["val"]
+        if len(train_history) == 0 and len(val_history) == 0:
+            return
+
+        fig, ax = plt.subplots()
+        if len(train_history) > 0:
+            ax.plot(
+                [s["epoch"] for s in train_history],
+                [s["loss"] for s in train_history],
+                label="train",
+            )
+        if len(val_history) > 0:
+            ax.plot(
+                [s["epoch"] for s in val_history],
+                [s["loss"] for s in val_history],
+                label="val",
+            )
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("loss")
+        ax.set_yscale("log")
+        ax.legend()
+        ax.set_title(f"{self.policy_name} loss curve")
+        ax.grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
+
+        loss_curve_path = os.path.join(self.args.checkpoint_dir, "loss_curve.png")
+        fig.savefig(loss_curve_path)
+        plt.close(fig)
+        print(f"[{self.__class__.__name__}] Save loss curve: {loss_curve_path}")
+
+        # Also dump the raw per-epoch losses so the curve can be re-plotted
+        # or analyzed later without re-parsing tensorboard logs
+        loss_by_epoch = {}
+        for s in train_history:
+            loss_by_epoch.setdefault(s["epoch"], {})["train_loss"] = s["loss"]
+        for s in val_history:
+            loss_by_epoch.setdefault(s["epoch"], {})["val_loss"] = s["loss"]
+
+        loss_csv_path = os.path.join(self.args.checkpoint_dir, "loss_history.csv")
+        with open(loss_csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss"])
+            for epoch in sorted(loss_by_epoch.keys()):
+                row = loss_by_epoch[epoch]
+                writer.writerow(
+                    [epoch, row.get("train_loss", ""), row.get("val_loss", "")]
+                )
+        print(f"[{self.__class__.__name__}] Save loss history: {loss_csv_path}")
 
     def detach_batch_result(self, batch_result):
         for k, v in batch_result.items():
@@ -512,6 +680,8 @@ class TrainBase(ABC):
 
         for k, v in epoch_summary.items():
             self.writer.add_scalar(f"{k}/{label}", v, epoch)
+
+        self.loss_history[label].append(epoch_summary)
 
         return epoch_summary
 

@@ -125,7 +125,15 @@ class VisualizeData:
             rgb_tactile_names = self.data_manager.get_meta_data(
                 "tactile_names"
             ).tolist()
-        self.camera_names = camera_names + rgb_tactile_names
+        try:
+            rgb_camera_names = self.data_manager.get_meta_data(
+                "rgb_camera_names"
+            ).tolist()
+        except KeyError:
+            # To ensure backward compatibility with episodes recorded before
+            # the rgb_camera_names bucket (e.g. Insta360) was added
+            rgb_camera_names = []
+        self.camera_names = camera_names + rgb_tactile_names + rgb_camera_names
 
         if rgb_crop_size_list is None:
             self.rgb_crop_size_list = None

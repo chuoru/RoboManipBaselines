@@ -8,6 +8,31 @@ from .MujocoFairino5EnvBase import MujocoFairino5EnvBase
 
 
 class MujocoFairino5CableEnv(MujocoFairino5EnvBase):
+    # Override the base class's 8/0.004 (0.032s/tick, ~31.25Hz): RealUMIDemo
+    # checkpoints (e.g. rolled out via misc/RolloutWithRecordedImages.py)
+    # were trained on data recorded from the Orbbec wrist camera's nominal
+    # 10Hz capture rate (TeleopBase requests fps=10; Log/OrbbecSDK.log.txt
+    # confirms ~10.0-10.2fps achieved), and each policy action step is one
+    # skip-interval of THAT real time. At the base class's 0.032s/tick, a
+    # skip=3 checkpoint's action -- calibrated for skip*0.1=0.3s of real
+    # motion -- was being asked to complete in skip*0.032=0.096s of
+    # simulated time, ~3.1x faster than recorded, which the arm's
+    # velocity/PID response cannot track (confirmed: policy_command_log
+    # showed the commanded trajectory oscillating/fluttering rather than
+    # tracking smoothly). frame_skip=25 makes one env tick 0.1s (sim_timestep
+    # unchanged, so physics substep fidelity is unaffected -- only the
+    # number of substeps per control tick increases), matching the
+    # recording's own tick rate 1:1 regardless of a checkpoint's skip value.
+    frame_skip = 25
+    metadata = {
+        "render_modes": [
+            "human",
+            "rgb_array",
+            "depth_array",
+        ],
+        "render_fps": int(1 / (MujocoFairino5EnvBase.sim_timestep * frame_skip)),
+    }
+
     def __init__(
         self,
         **kwargs,

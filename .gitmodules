@@ -52,3 +52,6 @@
 [submodule "third_party/linkerhand-python-sdk"]
 	path = third_party/linkerhand-python-sdk
 	url = https://github.com/linker-bot/linkerhand-python-sdk
+[submodule "third_party/ORB_SLAM3"]
+	path = third_party/ORB_SLAM3
+	url = https://github.com/UZ-SLAMLab/ORB_SLAM3.git

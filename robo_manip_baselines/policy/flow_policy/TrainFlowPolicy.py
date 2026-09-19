@@ -273,6 +273,10 @@ class TrainFlowPolicy(TrainBase, TrainPointCloudMixin):
             if epoch % max(self.args.num_epochs // 10, 1) == 0:
                 self.save_current_ckpt(f"epoch{epoch:0>4}", policy=policy)
 
+            # Check early stopping
+            if self.check_early_stop(epoch_summary):
+                break
+
         # Save last checkpoint
         self.save_current_ckpt("last", policy=policy)
 

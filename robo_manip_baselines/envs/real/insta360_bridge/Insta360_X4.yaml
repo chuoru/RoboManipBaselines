@@ -1,0 +1,98 @@
+%YAML:1.0
+
+# ORB-SLAM3 settings template for the Insta360 X3/X4 preview stream
+# (RES_1920_960P30, see main.cc). ALL numeric values below are PLACEHOLDERS
+# -- see envs/real/insta360_bridge/README.md's "Calibration" section. Do not
+# run this against real hardware before replacing them.
+#
+# Structure confirmed against ORB-SLAM3's own
+# Examples/Monocular-Inertial/TUM-VI.yaml (a real fisheye + IMU example, same
+# KannalaBrandt8 camera model this file uses) and RealSense_D435i.yaml (the
+# live-camera IMU.T_b_c1/noise field names).
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+# Insta360's preview stream is an un-stitched single fisheye lens image (per
+# the CameraSDK README), so the fisheye (Kannala-Brandt) model is used
+# rather than "PinHole". If the un-distorted/dewarped view is used instead
+# (see the top-level plan's still-open "360 video handling" question),
+# switch this to "PinHole" and replace k1-k4 below with the usual
+# k1/k2/p1/p2.
+Camera.type: "KannalaBrandt8"
+
+# PLACEHOLDER. Requires an actual camera calibration (e.g. via Kalibr or
+# OpenCV's fisheye calibration) against the real lens at RES_1920_960P30.
+Camera1.fx: 400.0
+Camera1.fy: 400.0
+Camera1.cx: 480.0
+Camera1.cy: 480.0
+
+# PLACEHOLDER equidistant (Kannala-Brandt) distortion coefficients.
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.k3: 0.0
+Camera1.k4: 0.0
+
+# Camera resolution -- must match LiveStreamParam.video_resolution in main.cc
+# (RES_1920_960P30).
+Camera.width: 1920
+Camera.height: 960
+
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB). main.cc converts to RGB before
+# broadcasting to Python but feeds SLAM the original BGR decode -- if that
+# changes, update this too.
+Camera.RGB: 0
+
+# PLACEHOLDER transformation from the IMU's body frame to the camera frame.
+# Requires an actual camera-IMU extrinsic calibration against the real
+# Insta360 unit (e.g. via Kalibr) -- there is no vendor-supplied value for
+# this. Identity rotation + zero translation is almost certainly wrong;
+# treat any tracking result before this is calibrated as unreliable.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0]
+
+# PLACEHOLDER IMU noise parameters (values below are VINS-Mono's generic
+# defaults, same starting point RealSense_D435i.yaml/TUM-VI.yaml use --
+# NOT measured against the Insta360's actual IMU). IMU.Frequency in
+# particular must match whatever rate OnGyroData actually delivers samples
+# at on the real camera; confirm and correct.
+IMU.InsertKFsWhenLost: 0
+IMU.NoiseGyro: 1e-3   # rad/s^0.5
+IMU.NoiseAcc: 1e-2    # m/s^1.5
+IMU.GyroWalk: 1e-6    # rad/s^1.5
+IMU.AccWalk: 1e-4     # m/s^2.5
+IMU.Frequency: 200.0  # PLACEHOLDER -- confirm against the real OnGyroData rate
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 1250
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters (unused; main.cc constructs System with use_viewer=false)
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

@@ -85,6 +85,14 @@ def parse_argument():
         help="whether to wait for a key press before starting motion (passed "
         "through to Rollout)",
     )
+    parser.add_argument(
+        "--show_images",
+        action="store_true",
+        help="open one cv2 window per camera showing exactly the (resized) "
+        "recorded frame being fed to the policy at each re-inference step "
+        "-- i.e. the same cadence/content update_images_buf() consumes, not "
+        "every physics substep. Separate from the MuJoCo/real-robot viewer.",
+    )
 
     args, remaining_argv = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining_argv
@@ -139,7 +147,7 @@ class RecordedImageSource:
         self._warned_end = False
 
 
-def patch_rollout_with_recorded_images(rollout, replay_images_from):
+def patch_rollout_with_recorded_images(rollout, replay_images_from, show_images=False):
     """Replace rollout.update_images_buf() with a copy of
     RolloutDiffusionPolicy.update_images_buf() that reads from a
     RecordedImageSource instead of self.info["rgb_images"] -- see that
@@ -165,11 +173,18 @@ def patch_rollout_with_recorded_images(rollout, replay_images_from):
         for camera_name in rollout.camera_names:
             image = image_source.frame(camera_name)
             image = cv2.resize(image, rollout.model_meta_info["data"]["image_size"])
+            if show_images:
+                cv2.imshow(
+                    f"[RolloutWithRecordedImages] {camera_name} (model input)",
+                    cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                )
             image = np.moveaxis(image, -1, -3)
             image = torch.tensor(image, dtype=torch.uint8)
             image = rollout.image_transforms(image)
             image = image * 2.0 - 1.0
             images.append(image)
+        if show_images:
+            cv2.waitKey(1)
 
         if rollout.images_buf is None:
             rollout.images_buf = [
@@ -223,7 +238,9 @@ def main():
             config = yaml.safe_load(f)
 
     rollout = Rollout(**config)
-    patch_rollout_with_recorded_images(rollout, args.replay_images_from)
+    patch_rollout_with_recorded_images(
+        rollout, args.replay_images_from, show_images=args.show_images
+    )
     rollout.run()
 
 

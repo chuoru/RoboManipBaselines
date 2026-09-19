@@ -5,17 +5,227 @@
 # camera_ids:
 #   hand: "000000000000"
 #
-# If using an Orbbec/Femto camera instead of RealSense, use
-# pointcloud_camera_ids (see setup_femtobolt in envs/real/RealEnvBase.py),
-# keyed by the camera's serial number so device order doesn't matter. Find
-# each camera's serial number by running:
+# INTERIM setup (active): Orbbec Gemini 305 as the "hand" camera, via
+# setup_femtobolt/pyorbbecsdk -- same mechanism as before Insta360 was
+# planned, kept available specifically as a stopgap for gripper_marker_config
+# below while the Insta360 CameraSDK application (see
+# envs/real/insta360_bridge/README.md) is still pending.
+#
+# NOTE: there are TWO Gemini 305 units on this system -- this serial
+# ("...004F") is the one physically mounted on the UMI handheld rig itself;
+# the other ("...005M") is mounted on the robot arm and is NOT this camera.
+# Confirmed by capturing a live frame: index/device order alone is NOT
+# reliable for telling them apart (both enumerate as "Orbbec Gemini 305"),
+# hence keying by this serial. If the physical camera is ever swapped,
+# re-verify with a live capture before trusting this key -- find candidate
+# serials with:
 #   python ./third_party/pyorbbecsdk/examples/enumerate.py
 pointcloud_camera_ids:
-   hand: "CV2L3600004F"
+  hand: "CV2L3600004F"
+# Requests the sensor's 1280x800@10fps color profile instead of the default
+# 848x530 (delivered at 640x480 after the existing pipeline's resize) --
+# see setup_femtobolt's docstring. Root-caused via live testing: gripper
+# marker detection accuracy was low/inconsistent even in good lighting
+# because each marker only spanned ~4.3 px per AprilTag module at the
+# default resolution (well under the ~8-10 px/module detectors want), not
+# primarily a lighting/CLAHE problem. This roughly doubles that to ~8.5
+# px/module. Confirmed this resolution is actually supported by this
+# camera's color sensor (853/1280x800 etc. all listed) via
+# third_party/pyorbbecsdk/examples/color.py-style profile enumeration.
+pointcloud_camera_color_resolution: [1280, 800, 10]
+# Forces a short, fixed exposure instead of auto-exposure -- see
+# setup_femtobolt's docstring. Root-caused via live testing: markers were
+# sometimes undetectable in a frame with perfectly reasonable brightness
+# (~150/255) because it was visibly MOTION-BLURRED -- auto-exposure
+# lengthens exposure time in dimmer conditions to keep brightness up, and
+# any hand/gripper motion during that longer window smears the marker's
+# bit pattern illegible regardless of overall brightness/contrast
+# afterwards. Trades some sensor noise for eliminating motion-blur risk
+# outright -- noise hurts a detector's bit-thresholding far less than blur
+# destroys the sharp edges it needs.
+#
+# First attempt used exposure=40 + gain=150 (vs. this camera's auto-exposure
+# default of ~100/16, range 1-1990 / 16-248): fixed the total-detection-
+# failure cases, but zoomed-in crops of subsequent snapshots showed visibly
+# heavy grain/speckle noise from gain=150 -- likely why marker "0"
+# specifically (positioned over a more cluttered/darker part of the scene
+# in those crops, so closer to the margin to begin with) was detected less
+# reliably than "1" even though nothing was zero/complete failures anymore.
+# Backed off to a milder point on the same exposure/gain trade-off curve
+# (measured live with a proxy noise metric -- median-filter residual stddev
+# -- across several combinations): still short enough to meaningfully cap
+# blur, noticeably less noisy than 40/150. Re-tune along this same curve
+# (shorter exposure + higher gain if blur reappears; longer exposure +
+# lower gain if noise/darkness looks like the bigger problem in your own
+# snapshots) rather than assuming these exact numbers are already optimal
+# for your specific lighting.
+pointcloud_camera_color_exposure: 80
+pointcloud_camera_color_gain: 80
+
+# Insta360 hand camera (the intended eventual replacement for the Gemini
+# above, and for the Vive Tracker below -- see insta360_bridge/README.md).
+# NOT usable yet: it depends on the Insta360 CameraSDK, which requires
+# applying at https://www.insta360.com/sdk/apply (pending as of this
+# writing). Uncomment once insta360_bridge is actually built and running;
+# until then leave this commented out and use pointcloud_camera_ids above
+# instead. Video frames AND the camera's ORB-SLAM3-estimated pose both come
+# from the insta360_bridge helper process (see envs/real/insta360_bridge/
+# and RealEnvBase.setup_insta360), keyed by name -> that process's Unix
+# domain socket path (or use misc/MockInsta360Bridge.py against this same
+# socket path to test the plumbing without real hardware).
+# insta360_ids:
+#   hand: "/tmp/insta360_hand.sock"
 
 # Note: unlike the robot envs, there is no robot_ip/gripper_modbus_port here
-# -- this rig has no attached robot arm or motorized gripper. Vive Tracker
-# calibration (serial number, vive_to_eef_frame_rotation,
-# vive_world_to_base_frame_rotation) is passed separately via
-# `--input_device vive --input_device_config teleop/configs/Vive.yaml`, the
-# same as for the teleoperated-robot envs -- see teleop/README.md.
+# -- this rig has no attached robot arm or motorized gripper. Pose tracking
+# for this rig is still the HTC Vive Tracker (`--input_device vive
+# --input_device_config teleop/configs/ViveUMI.yaml`, see teleop/README.md)
+# until Insta360-based tracking (teleop/Insta360InputDevice.py,
+# --input_device insta360 --input_device_config
+# teleop/configs/Insta360UMI.yaml) is usable -- same SDK dependency as above.
+#
+# M5Stack + load-cell weight scale mounted on/near the handheld gripper (see
+# setup_m5stack_scale in envs/real/RealEnvBase.py). Recorded every step as
+# DataKey.MEASURED_WEIGHT [g], alongside the cameras and the estimated pose,
+# so it ends up in the saved .rmb episode like any other measured key (usable
+# via --state_keys measured_weight when training; live-viewable during
+# teleop with `bin/Teleop.py RealUMIDemo --plot_weight`). Keyed by a
+# substring of the device's /dev/serial/by-id/* symlink name (its USB serial
+# number, stable across replugs/reboots -- unlike /dev/ttyACM<N>'s
+# enumeration index, which can shift). Find it with:
+#   ls /dev/serial/by-id/
+m5stack_ids:
+  scale: "D0:CF:13:0C:B4:D4"
+
+# ArUco gripper-marker width tracking (see
+# common/utils/ArucoGripperUtils.py, RealUMIEnvBase._get_obs()), following
+# https://github.com/real-stanford/universal_manipulation_interface's
+# approach: a small marker mounted on each finger, tracked by the SAME
+# camera_name frame used for the recorded video ("hand", from
+# pointcloud_camera_ids above). Recorded as DataKey.MEASURED_GRIPPER_JOINT_POS
+# (percent-closed) each step it's detected; falls back to echoing the last
+# commanded value on any step the markers aren't both/either visible
+# (occlusion, motion blur, out of frame). Live-viewable during teleop with
+# `bin/Teleop.py RealUMIDemo --plot_gripper_marker`.
+#
+# CONFIRMED WORKING against the real rig in this dev session: both markers
+# (IDs 0 and 1, DICT_4X4_50) detected on the actual UMI gripper via its own
+# Gemini camera, and a live 15s open/close capture showed the estimated
+# width tracking real motion (0.104m - 0.185m observed range) -- see
+# nominal_z/width_open_m/width_closed_m below, all measured this way rather
+# than guessed. Still worth re-verifying with --plot_gripper_marker that 0%
+# reads at true fully-open and 100% at true fully-closed (the 15s capture
+# window may not have hit the exact physical extremes), and that
+# marker_size_map's 0.015m matches the actually printed marker size (not
+# independently confirmed -- only checked for a plausible resulting depth).
+#
+# Switched from DICT_4X4_50 to AprilTag (16h5): AprilTag's detector does a
+# more thorough geometric/coding validation of each candidate than ArUco's,
+# so it trades a bit of maximum detection range/angle for far fewer false
+# accepts and generally more robust detection under non-ideal lighting --
+# the ArUco family was found to fail outright in dim conditions even with
+# CLAHE maxed out. Confirmed via synthetic round-trip that
+# detect_aruco_tags/get_gripper_width need no code changes for this switch
+# (see tests/TestArucoGripperUtils.py's TestArucoGripperUtilsAprilTag) --
+# OpenCV's ArucoDetector treats DICT_APRILTAG_16h5 as just another
+# predefined dictionary. parse_aruco_config also now auto-selects
+# CORNER_REFINE_APRILTAG (recommended by OpenCV for this family specifically)
+# instead of CORNER_REFINE_SUBPIX.
+#
+# Note on 16h5 specifically (vs. the more commonly recommended 36h11): its
+# 4x4-bit payload gives a minimum Hamming distance of only 5 (36h11: 11) and
+# a much smaller ID space (~30 unique tags vs ~587), so it is quicker to
+# detect and reads reliably at a smaller pixel footprint (useful for a
+# small marker at typical camera-to-finger distance), but is more prone to
+# a bit-flip under heavy noise being misread as a different valid ID than
+# 36h11 would be. RealUMIEnvBase's max_width_jump_m/width_smoothing_alpha
+# (see further below) specifically guard against exactly that kind of
+# single-frame misread, which mitigates most of the practical risk here.
+#
+# left_marker_id/right_marker_id: CONFIRMED via a live 1280x800 capture
+# (both markers detected cleanly) that tag ID 0 sits at the physically
+# RIGHT finger (measured x=+0.10m in the camera frame) and ID 1 at the
+# LEFT (x=-0.082m) -- i.e. swapped from the arbitrary ArUco-era default.
+# get_gripper_width computes right_x - left_x, so getting this backwards
+# silently produces a NEGATIVE width and a badly wrong percent-closed
+# reading rather than an obvious error -- re-verify with
+# misc/ViewGripperMarkerDetection.py if the markers are ever removed and
+# re-mounted.
+gripper_marker_config:
+  camera_name: hand
+  aruco_dict:
+    predefined: DICT_APRILTAG_16h5
+  marker_size_map:
+    default: null
+    0: 0.015
+    1: 0.015
+  left_marker_id: 1
+  right_marker_id: 0
+  # Measured depth range from the camera during the live capture was
+  # 0.1705-0.1912m (640x480) / confirmed consistent (0.177-0.183m) at
+  # 1280x800; midpoint + margin below.
+  nominal_z: 0.18
+  z_tolerance: 0.025
+  # Real Orbbec Gemini 305 color-stream intrinsics AT THE 1280x800 PROFILE
+  # pointcloud_camera_color_resolution above requests (queried live via
+  # pyorbbecsdk against that exact profile -- intrinsics are NOT simply the
+  # 640x480 ones linearly scaled, always re-query per-profile if the
+  # resolution changes again).
+  camera_matrix:
+    - [614.8552, 0.0, 633.1625]
+    - [0.0, 614.5864, 399.3985]
+    - [0.0, 0.0, 1.0]
+  # Real distortion, same live query (OpenCV order: k1,k2,p1,p2,k3,k4,k5,k6
+  # -- note pyorbbecsdk itself prints k1,k2,k3,k4,k5,k6,p1,p2, a DIFFERENT
+  # order; already reordered here).
+  dist_coeffs: [-1.040665, 0.473363, 0.000018, -0.000214, -0.046332, -1.021658, 0.447134, -0.036214]
+  # In a dim room (mean brightness ~9/255), clip_limit=6 was the difference
+  # between detecting 0 and 2 of the 2 mounted markers. BUT re-tested later
+  # in a normally-lit room (~130-155/255): comparing detection on the raw
+  # vs. this-enhanced version of the same saved frames showed clip_limit=6
+  # sometimes HELPING and sometimes HURTING (over-enhancing an already
+  # fine image can distort the bit pattern) -- it was never the dominant
+  # factor either way once pointcloud_camera_color_resolution above fixed
+  # the real bottleneck (marker pixel footprint, see that key's comment).
+  # Lowered to a milder default that should help in genuinely dark
+  # conditions without doing as much damage in bright ones; set to 0 to
+  # disable entirely if testing shows it is not worth it for your lighting.
+  # See preprocess_low_light_image's docstring.
+  clahe_clip_limit: 3.0
+  # Measured from a live 15s open/close capture (see above) -- the observed
+  # min/max, NOT independently confirmed to be the true physical extremes.
+  width_open_m: 0.185
+  # Re-calibrated: with the original 0.104 m, MirrorUmiGripperToFairino5.py's
+  # dry_run test never read above ~70% closed even when the rig was closed
+  # by hand as far as it goes, meaning the true fully-closed width is larger
+  # than 0.104 m, not smaller -- back-calculated from that 70% ceiling as
+  # 0.185 - 0.70 * (0.185 - 0.104) = 0.128 m. Re-run
+  # ./misc/CalibrateGripperMarkerWidth.py (new tool, prints the live raw
+  # min/max width_m while you open/close the rig by hand) to get an exact
+  # measurement and replace this if 100%/0% still don't line up with true
+  # fully-closed/open.
+  width_closed_m: 0.128
+  # Outlier rejection + smoothing (see RealUMIEnvBase.__init__'s comment for
+  # the full reasoning): added after live testing showed the displayed
+  # percent-closed occasionally snapping to 0%/100% under changing light --
+  # a single bad-frame width reading landing outside [width_closed_m,
+  # width_open_m] and getting clipped to an extreme, not a detection
+  # failure. max_width_jump_m rejects a single-step width change larger
+  # than this [m] outright (holds the last smoothed value instead);
+  # width_smoothing_alpha (0-1, higher = faster/noisier, lower =
+  # smoother/slower) exponentially averages accepted readings.
+  # Loosened from the original (0.03, 0.3): a fast real hand-close now spans
+  # the full (open - closed) range of ~0.057 m within a couple of frames,
+  # which the original max_width_jump_m=0.03 (already over half that range)
+  # was rejecting outright as a spurious jump, and alpha=0.3's slow EMA was
+  # additionally lagging well behind a fast close/open. max_width_jump_m is
+  # now close to the full calibrated range (fast, large motions are exactly
+  # what this rig needs to track -- a truly implausible single-frame jump,
+  # e.g. an ID misread producing a width outside the physically reachable
+  # range entirely, is still not fully immune but far less likely to land
+  # within +-0.06 m of the last accepted reading than the old +-0.03 m
+  # threshold was already tolerating). If bad-frame snapping reappears,
+  # tighten max_width_jump_m back down before touching alpha (alpha mainly
+  # trades responsiveness for noise, not outlier rejection).
+  max_width_jump_m: 0.06
+  width_smoothing_alpha: 0.6

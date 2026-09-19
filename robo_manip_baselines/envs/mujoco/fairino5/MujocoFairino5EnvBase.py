@@ -7,6 +7,7 @@ from gymnasium.spaces import Box, Dict
 from robo_manip_baselines.common import ArmConfig
 from robo_manip_baselines.teleop import (
     GelloInputDevice,
+    Insta360InputDevice,
     KeyboardInputDevice,
     SpacemouseInputDevice,
     ViveInputDevice,
@@ -62,6 +63,8 @@ class MujocoFairino5EnvBase(MujocoEnvBase):
             InputDeviceClass = KeyboardInputDevice
         elif input_device_name == "vive":
             InputDeviceClass = ViveInputDevice
+        elif input_device_name == "insta360":
+            InputDeviceClass = Insta360InputDevice
         else:
             raise ValueError(
                 f"[{self.__class__.__name__}] Invalid input device key: {input_device_name}"

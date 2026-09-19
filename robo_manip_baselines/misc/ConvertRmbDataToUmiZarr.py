@@ -33,6 +33,14 @@ robot arm = "robot0", a second arm for dual-arm setups would be "robot1", etc.
   camera{N}_rgb              (T, H, W, 3) uint8 -- resized to --image_size, in
                                                     the order of the .rmb file's
                                                     own camera_names attribute
+  {robot_prefix}_weight      (T, 1)  float32 -- DataKey.MEASURED_WEIGHT [g]
+                                                 from an M5Stack + load-cell
+                                                 scale (see setup_m5stack_scale
+                                                 in envs/real/RealEnvBase.py);
+                                                 only written when present in
+                                                 the source episode, e.g. a
+                                                 RealUMIDemoEnv recording made
+                                                 with m5stack_ids configured
 
 UMI's UmiDataset reconstructs "action" and the relative/absolute pose
 representations it actually trains on at load time from these same keys (see
@@ -126,6 +134,12 @@ class ConvertRmbDataToUmiZarr:
             episode_data[f"camera{camera_idx}_rgb"] = resize_images(
                 images, self.image_size
             )
+
+        if DataKey.MEASURED_WEIGHT in rmb_data:
+            weight = rmb_data[DataKey.MEASURED_WEIGHT][:].astype(np.float32)
+            if weight.ndim == 1:
+                weight = weight[:, None]
+            episode_data[f"{self.robot_prefix}_weight"] = weight
 
         return episode_data
 

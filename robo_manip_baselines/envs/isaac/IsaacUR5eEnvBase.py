@@ -578,6 +578,11 @@ class IsaacUR5eEnvBase(EnvDataMixin, gym.Env, ABC):
         return []
 
     @property
+    def rgb_camera_names(self):
+        """Get names of RGB-only (no depth) bridge-fed cameras, e.g. Insta360."""
+        return []
+
+    @property
     def intensity_tactile_names(self):
         """Get names of tactile sensors with intensity output."""
         return list(self.intensity_tactiles.keys())
