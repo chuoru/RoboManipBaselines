@@ -14,25 +14,19 @@
 #      image like the Windows build's host.docker.internal:0.0), and the
 #      host's X11 socket is bind-mounted below.
 #
-# GPU note: build.args below pins two things together, both needed for a
-# host whose driver is too old for CUDA 12.6+ (like this one):
-#   - CUDA_BASE_IMAGE: the Windows build's nvidia/cuda:12.4.1-devel base
-#     bakes in NVIDIA_REQUIRE_CUDA=cuda>=12.4, enforced by the container
-#     runtime independent of whatever torch actually needs. An unmet
-#     requirement triggers CUDA forward compatibility, which only supports
-#     data-center GPUs -- on a consumer/workstation card (e.g. TITAN RTX)
-#     this fails outright ("forward compatibility was attempted on non
-#     supported HW"), not just a slower fallback path.
-#   - TORCH_VERSION/TORCHVISION_VERSION/TORCHCODEC_VERSION (+ matching
-#     TORCH_INDEX_URL): torch==2.10.0 (the Windows build's default) only
-#     ships cu126+ wheels, so it needs pinning down to a version with cu121
-#     wheels to match the base image above.
-# Both diverge from the Windows build's defaults (nvidia/cuda:12.4.1 base,
-# torch==2.10.0/cu128) and from pyproject.toml's torch==2.10.0 pin -- see
-# the matching comments in Dockerfile for how the latter is kept from being
-# silently overwritten by the ".[act]" install step. If you later update
-# this host's NVIDIA driver to >=560 (cu126) or >=570 (cu128), drop this
-# whole build.args override to go back to the Windows build's versions.
+# GPU note: this file previously carried a build.args block pinning
+# CUDA_BASE_IMAGE to nvidia/cuda:12.2.2 and torch down to 2.5.1/cu121, for a
+# host whose driver was too old for CUDA 12.6+ (a TITAN RTX). That override has
+# been removed: this host runs an RTX 4090 Laptop on driver 595.91.07 / CUDA
+# 13.2, which satisfies the default base image's baked
+# NVIDIA_REQUIRE_CUDA=cuda>=12.4 natively, so the forward-compatibility trap
+# (which only supports data-center GPUs and fails outright on consumer cards)
+# cannot trigger. The build now uses the Dockerfile defaults:
+# nvidia/cuda:12.4.1-devel-ubuntu22.04 + torch 2.10.0/cu128.
+#
+# If this file is ever used on a host with a driver older than ~570, restore
+# the override -- see the Dockerfile's own comments for how pyproject.toml's
+# torch==2.10.0 pin is kept from silently undoing it.
 #
 # USB devices (SpaceMouse, GELLO, Femto Bolt/RealSense cameras, real robot
 # controllers) can be bound directly on native Linux -- no WSL-style
@@ -45,12 +39,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        CUDA_BASE_IMAGE: nvidia/cuda:12.2.2-devel-ubuntu22.04
-        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
-        TORCH_VERSION: 2.5.1
-        TORCHVISION_VERSION: 0.20.1
-        TORCHCODEC_VERSION: 0.1.1
     image: robo_manip_baselines:latest
     container_name: robo_manip_baselines
     stdin_open: true
@@ -72,6 +60,10 @@ services:
     volumes:
       - .:/workspace/RoboManipBaselines
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Rendezvous for the insta360_bridge Unix socket, so teleop running in
+      # this container can reach a bridge running in the insta360 container.
+      # See docker-compose.insta360.yaml.
+      - /tmp/insta360:/tmp/insta360:rw
     deploy:
       resources:
         reservations:

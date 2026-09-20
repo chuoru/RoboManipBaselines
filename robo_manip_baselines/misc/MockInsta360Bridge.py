@@ -26,7 +26,20 @@ import time
 
 import numpy as np
 
-from robo_manip_baselines.common import encode_insta360_message
+try:
+    from robo_manip_baselines.common import encode_insta360_message
+except ImportError:
+    # The package __init__ transitively imports torch/mujoco/gymnasium/pinocchio
+    # for what is, here, one stdlib+numpy function. Fall back to the module
+    # directly so this mock runs in the lightweight insta360 container (and
+    # anywhere else without the full ML dependency set).
+    import sys
+
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..", "common", "utils")))
+    # The module defines encode_message; encode_insta360_message is only the
+    # alias that common/__init__.py re-exports it under.
+    from Insta360Protocol import encode_message as encode_insta360_message
 
 
 class MockInsta360Bridge:

@@ -16,7 +16,11 @@ import time
 import cv2
 import numpy as np
 
-sys.path.insert(0, "/home/sandbox/Work/RoboManipBaselines/robo_manip_baselines/common/utils")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# common/utils is four levels up from this calibration/ directory.
+sys.path.insert(
+    0, os.path.normpath(os.path.join(_HERE, "..", "..", "..", "..", "common", "utils"))
+)
 from Insta360Protocol import read_message
 
 sock_path = sys.argv[1]

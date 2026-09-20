@@ -303,6 +303,23 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
         continue;
       }
       imu_queue_.push_back(imu_sample);
+      // Second, independent queue for --record's CSV writer. It must NOT
+      // share imu_queue_ with the SLAM thread: both drains are destructive,
+      // so a shared queue means whichever consumer runs first eats the
+      // samples and the other sees nothing. See TakeImuSamplesForRecording.
+      imu_record_queue_.push_back(imu_sample);
+      // Each queue now has exactly one consumer, and a consumer may not be
+      // running at all (the SLAM thread is not started for --no-slam, and
+      // nothing drains the record queue if the main loop stalls), so cap
+      // both. kMaxQueuedImuSamples is ~10s at the measured ~500Hz -- far
+      // more than the SLAM thread's normal ~1 gyro-batch (~100ms) of lag,
+      // while still bounding memory if a consumer is absent or wedged.
+      while (imu_queue_.size() > kMaxQueuedImuSamples) {
+        imu_queue_.pop_front();
+      }
+      while (imu_record_queue_.size() > kMaxQueuedImuSamples) {
+        imu_record_queue_.pop_front();
+      }
     }
     last_gyro_batch_wall_clock_sec_ = now_sec;
     gyro_batch_seq_++;
@@ -342,11 +359,38 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
     return true;
   }
 
-  // Drains every IMU sample queued since the last call.
+  // Drains every IMU sample queued since the last call. Consumed by the
+  // dedicated SLAM thread ONLY -- see TakeImuSamplesForRecording for why
+  // the --record writer gets its own queue rather than sharing this one.
   std::vector<ImuSample> TakeImuSamples() {
     std::lock_guard<std::mutex> lock(imu_mutex_);
     std::vector<ImuSample> samples(imu_queue_.begin(), imu_queue_.end());
     imu_queue_.clear();
+    return samples;
+  }
+
+  // Same samples, separate queue, for the main loop's --record CSV writer.
+  //
+  // These two consumers used to share imu_queue_, and both drains clear it.
+  // The main loop calls its drain on EVERY decoded frame (~30fps) whenever
+  // need_slam_frame is true -- which includes ordinary live SLAM runs with
+  // no --record at all, where it immediately threw the samples away. So in
+  // live tracking the main loop was stealing most IMU data from the SLAM
+  // thread, which then fed TrackMonocular empty windows ("Empty IMU
+  // measurements vector!!!"). Keyframes born from those frames get no
+  // preintegration, and LocalMapping::InitializeIMU ->
+  // Optimizer::InertialOptimization then dereferences a null
+  // mpImuPreintegrated -- observed on real hardware as a SIGSEGV inside
+  // IMU::Preintegrated::SetNewBias, a few seconds after tracking reached OK.
+  //
+  // This also explains why a --no-slam --record capture measured a clean
+  // ~500Hz with zero empty frame intervals: with no SLAM thread running,
+  // nothing was competing for the queue.
+  std::vector<ImuSample> TakeImuSamplesForRecording() {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    std::vector<ImuSample> samples(imu_record_queue_.begin(),
+                                    imu_record_queue_.end());
+    imu_record_queue_.clear();
     return samples;
   }
 
@@ -432,7 +476,9 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
 
   std::mutex imu_mutex_;
   std::condition_variable gyro_cv_;
-  std::deque<ImuSample> imu_queue_;
+  static constexpr size_t kMaxQueuedImuSamples = 5000;  // ~10s at ~500Hz
+  std::deque<ImuSample> imu_queue_;          // drained by the SLAM thread
+  std::deque<ImuSample> imu_record_queue_;   // drained by --record
   double first_gyro_wall_clock_sec_ = -1.0;
   double last_gyro_batch_wall_clock_sec_ = -1.0;
   uint64_t gyro_batch_seq_ = 0;
@@ -503,7 +549,20 @@ constexpr int kSlamFrameSize = 800;      // must match Camera.width/height
 // crashes earlier this session that feeding ORB_SLAM3 pixels beyond the
 // monotonic range segfaults it. 370px stays at ~93deg with a real
 // margin. Re-verify (see calibration/README.md) if Camera1.k1-k4 changes.
-constexpr int kMaskRadiusPx = 370;
+//
+// Widened 370 -> 385 as a tracking-robustness experiment. Recomputing the
+// current kb4 fit's monotonic range exactly (see calibration/README.md for
+// the snippet) puts the limit at theta<=103.08deg, which at fx=214.09
+// projects to 398.1px -- so the earlier "~107deg at 400px" estimate was
+// slightly pessimistic, but the conclusion that 400px overshoots stands.
+//   370px -> 90.06deg  (28.1px margin)
+//   385px -> 94.73deg  (13.1px margin, +8.3% usable image area)
+//   398px -> 102.55deg (0.1px margin -- do not go here)
+// 385 keeps a real margin while recovering FOV, aimed at the "Fail to track
+// local map!" resets that dominate live tracking (26 in a 70s run) and keep
+// maps too short-lived for LocalMapping::InitializeIMU to ever fire. Revert
+// to 370 if the beyond-monotonic-range segfault reappears.
+constexpr int kMaskRadiusPx = 385;
 
 // Dual-lens (360) capture mode -- required for IMU delivery, see the
 // INSTA360_GYRO_HAS_ACCEL comment above -- delivers RAW DUAL-FISHEYE:
@@ -925,7 +984,7 @@ int main(int argc, char** argv) {
     server.Broadcast(EncodeFrameMessage(frame_timestamp_sec, rgb_frame.cols,
                                          rgb_frame.rows, rgb_frame.data));
 
-    for (const auto& sample : delegate->TakeImuSamples()) {
+    for (const auto& sample : delegate->TakeImuSamplesForRecording()) {
       imu_meas.emplace_back(sample.accel[0], sample.accel[1], sample.accel[2],
                              sample.gyro[0], sample.gyro[1], sample.gyro[2],
                              sample.timestamp_sec);

@@ -22,3 +22,14 @@ third_party/gello_software
 third_party/fairino-python-sdk
 third_party/linkerhand-python-sdk
 third_party/YCB_sim
+third_party/ORB_SLAM3
+third_party/insta360_sdk
+
+# Above two are new and matter for different reasons:
+#   ORB_SLAM3 -- the moment this submodule is initialised on the host, every
+#     `docker compose -f docker-compose.linux.yaml build` would start shipping
+#     the whole tree (ORBvoc.txt.tar.gz included) into the ML image's context.
+#     Dockerfile.insta360 clones its own copy into /opt instead.
+#   insta360_sdk -- proprietary CameraSDK, ~17MB, must never be baked into an
+#     image layer (redistribution). It reaches the bridge via the runtime bind
+#     mount in docker-compose.insta360.yaml.

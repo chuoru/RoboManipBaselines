@@ -50,27 +50,27 @@ File.version: "1.0"
 # applies directly.
 Camera.type: "KannalaBrandt8"
 
-# Real OpenCV fisheye calibration (cv2.fisheye.calibrate) against the BACK
-# lens specifically -- run insta360_bridge with --lens back to match, or
-# recalibrate for the front lens if running without that flag. 24 images,
-# 9x6-corner checkerboard, 24mm squares, spread across center/mid/outer
-# radial zones (verified essential: fisheye calibration diverges badly with
-# only centrally-clustered points). RMS reprojection error: 26.6px -- a
-# real fit, not a placeholder, but higher than a well-tuned calibration
-# should be (ideally <1-2px); treat as a solid first pass, not final.
-# Re-run scripts/calibration (see README.md's Calibration section) with
-# more images and/or better lighting/focus to improve if tracking quality
-# isn't sufficient.
+# Historical note: an earlier cv2.fisheye.calibrate fit of the BACK lens
+# (24 images, 9x6 checkerboard, 26.6px RMS) was superseded by the Basalt fit
+# below. The OpenCV tooling is still in calibration/ as a fallback.
 #
 # Basalt KannalaBrandt8 (kb4) camera-only intrinsics, from a fresh AprilGrid
 # calibration at the widened 1920->800 crop/resolution (full lens circle,
 # no margin trim -- see main.cc's kBoundingBoxOrigin/kSlamFrameSize
 # comment for why). Reprojection error 0.50px. This fit's own monotonic
-# (physically valid) equidistant range is theta<=103.1deg -- narrower than
-# the previous 640-resolution fit's ~120.8deg, which is why
-# main.cc's kMaskRadiusPx is 370 (not the full 400px inscribed circle);
-# re-verify that range (see calibration/README.md) if these coefficients
-# change.
+# (physically valid) equidistant range is theta<=103.08deg -- narrower than
+# the previous 640-resolution fit's ~120.8deg. Re-verify that range (see
+# calibration/README.md for the snippet) if these coefficients change.
+#
+# CORRECTION to an earlier note here: the monotonic range is NOT what sets
+# main.cc's kMaskRadiusPx=370. At fx=214.09, theta=103.08deg projects to
+# 398.1px from centre -- essentially the full 400px inscribed circle.
+# Inverting the model, 370px corresponds to theta=90.06deg, so the mask is
+# currently the 90deg hemisphere and is ~28px TIGHTER than the model's
+# validity requires. Widening toward ~395px would recover valid field of
+# view (and ORB features, which bears on the "Fail to track local map!"
+# resets noted below) -- untested on hardware, since the outer annulus is
+# also where vignetting and resolution loss are worst.
 Camera1.fx: 214.0900
 Camera1.fy: 214.1310
 Camera1.cx: 396.5260
@@ -150,7 +150,26 @@ IMU.NoiseGyro: 8.429130e-04   # rad/s/sqrt(Hz) (5x stationary measurement)
 IMU.NoiseAcc: 2.011808e-02    # m/s^2/sqrt(Hz) (5x stationary measurement)
 IMU.GyroWalk: 6.339842e-04    # rad/s^2/sqrt(Hz) (8x stationary measurement, already rough -- see comment above)
 IMU.AccWalk: 7.626927e-03     # m/s^3/sqrt(Hz) (8x stationary measurement, already rough -- see comment above)
-IMU.Frequency: 318.7  # measured from OnGyroData batch timestamps (main.cc)
+IMU.Frequency: 500.0  # measured on firmware v1.1.6 -- see note below
+# IMU.Frequency was 318.7, measured on firmware v1.0.83. Re-measured on
+# firmware v1.1.6 (X3, serial IAQEB2606EEWG9) from a 20.5s --record capture:
+# 10450 gyro + 10450 accel samples over 20.80s = 502.4 Hz by count/span, with
+# mean inter-sample dt of exactly 2.000 ms => a steady 500 Hz. This is a real
+# firmware difference, not noise (dt median 2.039 ms, p95 2.306, max 2.571).
+#
+# This matters more than it looks. ORB-SLAM3 does, in Tracking.cc:
+#     const float sf = sqrt(mImuFreq);
+#     mpImuCalib = new IMU::Calib(Tbc, Ng*sf, Na*sf, Ngw/sf, Naw/sf);
+# so the four noise values above are scaled by sqrt(frequency) (walks are
+# divided by it). At 318.7 instead of 500 every term was off by
+# sqrt(500/318.7) = 1.26x: white noise under-scaled (over-trusting the IMU)
+# and bias walk over-scaled.
+#
+# CAVEAT for re-tuning: the x5/x8 inflation above was chosen WITH the wrong
+# 318.7 in place. Correcting to 500 raises effective white noise by 1.26x
+# (safer w.r.t. the LM bias runaway documented above) but lowers effective
+# bias walk by the same factor (less safe). If the "Sophus SO3::exp failed!"
+# crash reappears, raise GyroWalk/AccWalk before touching anything else.
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters
@@ -181,8 +200,8 @@ ORBextractor.minThFAST: 7
 # Viewer Parameters (only used when insta360_bridge is run with --viewer)
 #--------------------------------------------------------------------------------------------
 # Scales the "Current Frame" display window relative to the native
-# 640x640 SLAM crop (see main.cc) -- display-only, does not affect
-# tracking resolution/quality. 640 is already a reasonable window size.
+# 800x800 SLAM frame (see main.cc's kSlamFrameSize) -- display-only, does
+# not affect tracking resolution/quality. 800 is already a reasonable size.
 Viewer.imageViewScale: 1.0
 
 Viewer.KeyFrameSize: 0.05

@@ -1,0 +1,217 @@
+# Dedicated image for envs/real/insta360_bridge: ORB-SLAM3 (CPU-only) + Pangolin
+# + the Insta360 CameraSDK bridge, plus (in the default `calib` stage) Basalt and
+# the python calibration tooling.
+#
+# Deliberately NOT based on the root Dockerfile's nvidia/cuda image: nothing in
+# this stack uses CUDA (ORB-SLAM3 @4452a3c4 links only OpenCV/Eigen/Pangolin/
+# DBoW2/g2o/boost_serialization/crypto), and the CUDA base bakes in
+# NVIDIA_REQUIRE_CUDA, which would make the container refuse to start without the
+# NVIDIA Container Toolkit for no benefit. The only GPU need here is OpenGL for
+# the Pangolin viewers, which this host serves from the Intel iGPU (verified:
+# a container with /dev/dri gets "direct rendering: Yes", Mesa Intel (RPL-S),
+# OpenGL 4.6).
+#
+# Ubuntu 22.04, not 24.04: Basalt's prebuilt installer targets 22.04+; Pangolin
+# v0.6's ffmpeg backend does not build against 24.04's FFmpeg 6; 24.04's PEP 668
+# blocks plain `pip install`; and GCC 13 needs <cstdint> fixups this code vintage
+# omits. 22.04 is also the FLOOR for the proprietary CameraSDK: libCameraSDK.so
+# requires GLIBC_2.17 / GLIBCXX_3.4.30 / CXXABI_1.3.13, and GLIBCXX_3.4.30 is the
+# GCC 12 runtime (22.04's libstdc++6). Ubuntu 20.04 tops out at 3.4.28 and would
+# NOT work -- any escape hatch here goes up to 24.04, never down.
+FROM ubuntu:22.04 AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake pkg-config git ca-certificates curl wget \
+      xz-utils unzip \
+      libopencv-dev python3-opencv libeigen3-dev \
+      libboost-serialization-dev libssl-dev \
+      libglew-dev libgl1-mesa-dev libegl1-mesa-dev \
+      libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+      libxkbcommon-dev \
+      libgl1-mesa-dri libglx-mesa0 libglu1-mesa mesa-utils x11-apps \
+      libxtst6 \
+      libavcodec-dev libavutil-dev libswscale-dev libavformat-dev ffmpeg \
+      libusb-1.0-0-dev libudev-dev usbutils \
+      python3 python3-dev python3-pip python3-numpy python3-yaml python3-tk \
+      libglib2.0-0 libsm6 libxext6 libxrender1 gdb strace less \
+    && rm -rf /var/lib/apt/lists/*
+# Notes on the list above:
+#  - apt python3-opencv, NOT the opencv-python wheel: same build as the C++
+#    libopencv we link, so cv2.imshow uses the system GTK backend rather than
+#    the wheel's bundled-Qt xcb plugin.
+#  - libxtst6 and the mesa/X runtime libs are pre-installed so Basalt's
+#    installer (calib stage) finds its runtime deps already satisfied and skips
+#    its own apt-get step.
+
+# --- Pangolin ---------------------------------------------------------------
+# v0.6 specifically: Pangolin >=0.7 needs C++17 in its public headers, and
+# ORB-SLAM3 appends an explicit -std=c++1x straight into CMAKE_CXX_FLAGS (see the
+# sed below), so a C++17 Pangolin cannot be consumed without a much larger patch.
+#
+# Installed under /opt/pangolin-0.6, NOT /usr/local: the calib stage installs
+# Basalt, which ships its OWN Pangolin under /root/.local/lib. Keeping ours off
+# the default loader path removes any chance of the wrong libpangolin being
+# picked up. See also the wrapper scripts in the calib stage -- we deliberately
+# do NOT export LD_LIBRARY_PATH globally, because it would override the
+# DT_RUNPATH CMake bakes into our binaries.
+ARG PANGOLIN_TAG=v0.6
+ENV PANGOLIN_PREFIX=/opt/pangolin-0.6
+RUN git clone --depth 1 --branch ${PANGOLIN_TAG} \
+        https://github.com/stevenlovegrove/Pangolin.git /tmp/Pangolin \
+ && cmake -S /tmp/Pangolin -B /tmp/Pangolin/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=${PANGOLIN_PREFIX} \
+      -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF \
+      -DBUILD_PANGOLIN_FFMPEG=OFF -DBUILD_PANGOLIN_PYTHON=OFF \
+      -DBUILD_PANGOLIN_LIBOPENEXR=OFF \
+ && cmake --build /tmp/Pangolin/build -j"$(nproc)" \
+ && cmake --install /tmp/Pangolin/build \
+ && rm -rf /tmp/Pangolin
+
+# --- ORB-SLAM3 --------------------------------------------------------------
+# Cloned here rather than COPYied from the third_party/ORB_SLAM3 submodule, so
+# the host repo stays untouched (all 15 submodules are uninitialised) and the
+# ~150MB vocabulary never enters the build context.
+# KEEP THIS SHA IN SYNC WITH .gitmodules' pin.
+ARG ORB_SLAM3_COMMIT=4452a3c4ab75b1cde34e5505a36ec3f9edcdc4c4
+ENV ORB_SLAM3_DIR=/opt/ORB_SLAM3
+RUN mkdir -p ${ORB_SLAM3_DIR} \
+ && git -C ${ORB_SLAM3_DIR} init -q \
+ && git -C ${ORB_SLAM3_DIR} remote add origin \
+        https://github.com/UZ-SLAMLab/ORB_SLAM3.git \
+ && git -C ${ORB_SLAM3_DIR} fetch -q --depth 1 origin ${ORB_SLAM3_COMMIT} \
+ && git -C ${ORB_SLAM3_DIR} checkout -q FETCH_HEAD
+
+# MANDATORY patch, not a nicety: upstream does
+#   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+# which OVERRIDES any -DCMAKE_CXX_STANDARD=14 passed on the command line.
+# Pangolin v0.6's headers and the vendored Sophus both need >= C++14.
+RUN set -eux; \
+    for f in CMakeLists.txt Thirdparty/DBoW2/CMakeLists.txt Thirdparty/g2o/CMakeLists.txt; do \
+      if [ -f "${ORB_SLAM3_DIR}/$f" ]; then \
+        sed -i 's/-std=c++11/-std=c++14/g; s/-std=c++0x/-std=c++14/g' "${ORB_SLAM3_DIR}/$f"; \
+      fi; \
+    done; \
+    grep -n 'std=c++' ${ORB_SLAM3_DIR}/CMakeLists.txt || true
+
+# SECOND MANDATORY PATCH: strip -march=native from all three CMakeLists.
+#
+# ORB-SLAM3, its vendored DBoW2 and its vendored g2o all add -march=native to
+# their Release flags. On any AVX-capable CPU that raises Eigen's required
+# alignment for fixed-size vectorizable types from 16 to 32 bytes. The vendored
+# g2o is 2011-era and allocates graph vertices/edges with plain new/delete
+# without applying EIGEN_MAKE_ALIGNED_OPERATOR_NEW consistently. At 16 bytes
+# glibc's natural malloc alignment happens to satisfy Eigen; at 32 it does not,
+# so the heap is quietly corrupted and the damage only surfaces when the graph
+# is torn down.
+#
+# Diagnosed here on real hardware (i9-13900HX), reproducibly, via gdb:
+#   free()
+#   g2o::HyperGraph::clear()
+#   g2o::OptimizableGraph::~OptimizableGraph()
+#   ORB_SLAM3::Optimizer::BundleAdjustment()
+#   ORB_SLAM3::Optimizer::GlobalBundleAdjustemnt()
+#   ORB_SLAM3::Tracking::CreateInitialMapMonocular()
+# i.e. "double free or corruption (out)" the instant monocular-inertial
+# initialisation finished its first global bundle adjustment -- every time,
+# right after "New Map created with N points".
+#
+# Keep this in sync with INSTA360_BRIDGE_ARCH_FLAGS in the bridge's
+# CMakeLists.txt: the bridge must be built with the SAME arch flags as the
+# library it links, so both are now plain baseline x86-64.
+RUN set -eux; \
+    for f in CMakeLists.txt Thirdparty/DBoW2/CMakeLists.txt Thirdparty/g2o/CMakeLists.txt; do \
+      if [ -f "${ORB_SLAM3_DIR}/$f" ]; then \
+        sed -i 's/ -march=native//g' "${ORB_SLAM3_DIR}/$f"; \
+      fi; \
+    done; \
+    ! grep -rn 'march=native' ${ORB_SLAM3_DIR}/CMakeLists.txt \
+        ${ORB_SLAM3_DIR}/Thirdparty/DBoW2/CMakeLists.txt \
+        ${ORB_SLAM3_DIR}/Thirdparty/g2o/CMakeLists.txt
+
+# -j16 not -j32: ORB-SLAM3's heaviest TUs peak around 2GB each and this box has
+# 30GB. Building the ORB_SLAM3 target only (not build.sh's blanket `make`) skips
+# ~20 example executables the bridge never links -- most of the build time, and
+# the most common place an unrelated example breaks the whole build.
+# mono_inertial_euroc is kept deliberately: it is the smoke test that validates
+# this entire stack on a public dataset before any hardware is involved.
+ARG ORB_SLAM3_JOBS=16
+RUN set -eux; \
+    for d in Thirdparty/DBoW2 Thirdparty/g2o Thirdparty/Sophus; do \
+      cmake -S ${ORB_SLAM3_DIR}/$d -B ${ORB_SLAM3_DIR}/$d/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=${PANGOLIN_PREFIX}; \
+      cmake --build ${ORB_SLAM3_DIR}/$d/build -j"${ORB_SLAM3_JOBS}"; \
+    done; \
+    tar -xf ${ORB_SLAM3_DIR}/Vocabulary/ORBvoc.txt.tar.gz -C ${ORB_SLAM3_DIR}/Vocabulary; \
+    rm -f ${ORB_SLAM3_DIR}/Vocabulary/ORBvoc.txt.tar.gz; \
+    cmake -S ${ORB_SLAM3_DIR} -B ${ORB_SLAM3_DIR}/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH=${PANGOLIN_PREFIX}; \
+    cmake --build ${ORB_SLAM3_DIR}/build \
+      --target ORB_SLAM3 mono_inertial_euroc -j"${ORB_SLAM3_JOBS}"; \
+    test -f ${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so; \
+    test -f ${ORB_SLAM3_DIR}/Vocabulary/ORBvoc.txt
+
+ENV ORB_VOCAB=/opt/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+    PYTHONPATH=/workspace/RoboManipBaselines \
+    INSTA360_SDK_DIR=/workspace/RoboManipBaselines/third_party/insta360_sdk
+WORKDIR /workspace/RoboManipBaselines/robo_manip_baselines/envs/real/insta360_bridge
+
+# ============================================================================
+FROM base AS slam
+CMD ["/bin/bash"]
+
+# ============================================================================
+FROM base AS calib
+
+# Basalt prebuilt release -> /root/.local/{bin,lib,etc/basalt}. Source builds
+# need CMake >= 3.24 + vcpkg and 22.04 ships 3.22, so the prebuilt path is
+# strongly preferred. The installer is fully non-interactive and handles root
+# (its run_privileged() calls straight through when id -u == 0).
+RUN curl -LsSf \
+      https://gitlab.com/VladyslavUsenko/basalt/-/raw/master/scripts/install.sh \
+    | sh \
+ && ls /root/.local/bin/basalt_*
+
+# The installer's env script exports LD_LIBRARY_PATH=$HOME/.local/lib. We must
+# NOT do that globally: CMake emits DT_RUNPATH (not DT_RPATH) for our ORB-SLAM3
+# build tree, and LD_LIBRARY_PATH takes PRECEDENCE over DT_RUNPATH -- so a global
+# export would let Basalt's bundled libpangolin hijack the bridge and
+# mono_inertial_euroc. Instead give each basalt_* binary a wrapper that scopes
+# LD_LIBRARY_PATH to just that process. Harmless if the release binaries already
+# carry their own $ORIGIN RPATH.
+RUN set -eux; \
+    for b in /root/.local/bin/basalt_*; do \
+      n="$(basename "$b")"; \
+      printf '#!/bin/sh\nexport LD_LIBRARY_PATH=/root/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\nexec %s "$@"\n' "$b" \
+        > "/usr/local/bin/$n"; \
+      chmod +x "/usr/local/bin/$n"; \
+    done; \
+    ls -l /usr/local/bin/basalt_*
+
+# Calibration-only python deps. NOT opencv-python -- python3-opencv (apt, above)
+# is the same build as the C++ libopencv we link against, and a PyPI wheel would
+# shadow it with a second, Qt-bundling OpenCV.
+#
+# "numpy<2" is load-bearing, not tidiness: apt's python3-opencv is compiled
+# against NumPy 1.x, and letting pip resolve scipy/matplotlib freely pulls
+# NumPy 2.x, which breaks cv2 at import with
+#   AttributeError: _ARRAY_API not found / numpy.core.multiarray failed to import
+# NumPy 1.x keeps ABI compatibility across its own minor versions, so pinning
+# below 2 lets pip upgrade 1.21 -> 1.26 without breaking the apt-built cv2.
+# The import check below fails the build if this ever regresses.
+# pillow: gen_aprilgrid.py/gen_checkerboard.py print their PNG->PDF hint
+# in terms of PIL, and a 300dpi PDF prints at exact scale far more
+# reliably than a PNG.
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+ && python3 -m pip install --no-cache-dir \
+      "numpy<2" allantools matplotlib scipy telemetry-parser ffmpeg-python \
+      pillow \
+ && python3 -c "import cv2, numpy; print('cv2', cv2.__version__, 'numpy', numpy.__version__)"
+
+CMD ["/bin/bash"]
