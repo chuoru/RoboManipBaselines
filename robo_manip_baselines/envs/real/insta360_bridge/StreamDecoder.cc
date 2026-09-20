@@ -15,7 +15,27 @@ StreamDecoder::StreamDecoder(bool is_h265) {
   }
 
   codec_ctx_ = avcodec_alloc_context3(codec);
-  if (!codec_ctx_ || avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
+  if (!codec_ctx_) {
+    throw std::runtime_error("StreamDecoder: avcodec_alloc_context3 failed");
+  }
+  // avcodec_alloc_context3's default leaves thread_count=1 (confirmed
+  // against real hardware, not "auto" despite some docs implying 0/unset
+  // means that) -- single-threaded decode of the live 3840x1920 dual-fisheye
+  // stream measured ~28-30ms/frame (avg, spiking to 56-77ms on I-frames),
+  // capping throughput at ~20.7fps against the camera's configured 30fps and
+  // producing periodic >300ms stalls. FF_THREAD_SLICE was tried first (adds
+  // no pipeline latency) and measured no improvement -- the camera's
+  // encoder emits one slice per frame, so there's nothing for
+  // slice-parallelism to split. FF_THREAD_FRAME with thread_count=2
+  // (confirmed against real hardware) measured ~8-9ms/frame avg, restoring
+  // the full 30fps and eliminating stalls >150ms entirely in a 15s socket
+  // throughput test (vs. 3 stalls up to 382ms at thread_count=1). Tradeoff:
+  // up to thread_count-1=1 extra frame (~33ms at 30fps) of decode-pipeline
+  // latency -- accepted since it's much smaller than the >300ms stalls it
+  // replaces.
+  codec_ctx_->thread_count = 2;
+  codec_ctx_->thread_type = FF_THREAD_FRAME;
+  if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
     throw std::runtime_error("StreamDecoder: avcodec_open2 failed");
   }
 
@@ -76,8 +96,13 @@ bool StreamDecoder::Decode(const uint8_t* data, size_t size,
             static_cast<AVPixelFormat>(av_frame_->format), av_frame_->width,
             av_frame_->height, AV_PIX_FMT_BGR24, SWS_BILINEAR, nullptr,
             nullptr, nullptr);
-        out_frame.create(av_frame_->height, av_frame_->width, CV_8UC3);
       }
+      // out_frame is a fresh cv::Mat on every call (see OnVideoData), so it
+      // must be (re-)allocated every time, not just once when sws_ctx_ is
+      // first created -- otherwise every frame after the first writes
+      // through a null data pointer (cv::Mat::create is a no-op once the
+      // size/type already match, so this stays cheap).
+      out_frame.create(av_frame_->height, av_frame_->width, CV_8UC3);
 
       uint8_t* dst_data[4] = {out_frame.data, nullptr, nullptr, nullptr};
       int dst_linesize[4] = {static_cast<int>(out_frame.step), 0, 0, 0};

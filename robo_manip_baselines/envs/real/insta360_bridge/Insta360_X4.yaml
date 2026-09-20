@@ -1,9 +1,36 @@
 %YAML:1.0
 
-# ORB-SLAM3 settings template for the Insta360 X3/X4 preview stream
-# (RES_1920_960P30, see main.cc). ALL numeric values below are PLACEHOLDERS
-# -- see envs/real/insta360_bridge/README.md's "Calibration" section. Do not
-# run this against real hardware before replacing them.
+# ORB-SLAM3 settings for the Insta360 X3/X4 Sphere-mode live stream, cropped
+# to a single lens (see main.cc's slam_frame crop, --lens front|back).
+# Camera1.fx/fy/cx/cy/k1-k4 and IMU.T_b_c1 below are from a real Basalt
+# camera-IMU calibration (KannalaBrandt8/kb4, AprilGrid target, 22mm tags) --
+# see envs/real/insta360_bridge/README.md's "Calibration" section for the
+# full pipeline. IMU.T_b_c1 is taken from basalt_calibrate_imu's phase-1
+# result (extrinsics + bias + gravity only, accel/gyro scale held at
+# identity) rather than its final saved output: with --no-gui,
+# calibrate_imu.cpp unconditionally runs a second phase
+# (setOptImuScale(true)) that refines the 3x3 accel/gyro scale matrices, but
+# on our recorded sweep this phase was under-excited (not enough real
+# translational acceleration to make scale observable) and converged to a
+# degenerate near-zero solution (accel_scale diag ~0.1, gravity norm ~0.93
+# m/s^2 instead of ~9.8) -- confirmed by the fact this reduces the
+# optimizer's own total cost, i.e. it's a real local/global minimum of an
+# ill-posed problem, not a numerical bug. Phase 1 alone (before scale
+# refinement kicks in) gave gravity norm 9.58 m/s^2 (98% of real 9.81) with
+# 0.66px mean reprojection and physically plausible T_i_c0 -- extracted by
+# hand from that phase's log output since basalt_calibrate_imu --no-gui only
+# writes calibration.json after all phases (incl. the broken one) complete.
+# Re-run the IMU calibration with a more aggressively-excited sweep (fast
+# shakes/translations in multiple directions, not just smooth pans) if a
+# GUI-converged, scale-refined result is needed later -- tried once more
+# with a larger, more varied real sweep (5423 frames, wide distance
+# variation from close-up to full-room pull-back) specifically for this,
+# but it broke the joint camera-IMU initial trajectory estimation instead
+# (stuck at ~30px reprojection, no real optimizer progress); that sweep's
+# camera-only intrinsics converged fine regardless and are used above.
+# IMU noise parameters below are now real measured values (see their own
+# comment), no longer placeholders. IMU.Frequency reflects the real
+# measured gyro rate (~318.7 Hz from OnGyroData batch timestamps).
 #
 # Structure confirmed against ORB-SLAM3's own
 # Examples/Monocular-Inertial/TUM-VI.yaml (a real fisheye + IMU example, same
@@ -15,31 +42,51 @@
 #--------------------------------------------------------------------------------------------
 File.version: "1.0"
 
-# Insta360's preview stream is an un-stitched single fisheye lens image (per
-# the CameraSDK README), so the fisheye (Kannala-Brandt) model is used
-# rather than "PinHole". If the un-distorted/dewarped view is used instead
-# (see the top-level plan's still-open "360 video handling" question),
-# switch this to "PinHole" and replace k1-k4 below with the usual
-# k1/k2/p1/p2.
+# Verified against real hardware: Sphere (360) capture mode -- required for
+# IMU delivery -- delivers raw dual-fisheye (two side-by-side circular
+# fisheye images, one per lens), not a stitched equirectangular panorama.
+# main.cc crops to the front lens's circle only (left half, square), so this
+# genuinely is a single fisheye lens image and the Kannala-Brandt model
+# applies directly.
 Camera.type: "KannalaBrandt8"
 
-# PLACEHOLDER. Requires an actual camera calibration (e.g. via Kalibr or
-# OpenCV's fisheye calibration) against the real lens at RES_1920_960P30.
-Camera1.fx: 400.0
-Camera1.fy: 400.0
-Camera1.cx: 480.0
-Camera1.cy: 480.0
+# Real OpenCV fisheye calibration (cv2.fisheye.calibrate) against the BACK
+# lens specifically -- run insta360_bridge with --lens back to match, or
+# recalibrate for the front lens if running without that flag. 24 images,
+# 9x6-corner checkerboard, 24mm squares, spread across center/mid/outer
+# radial zones (verified essential: fisheye calibration diverges badly with
+# only centrally-clustered points). RMS reprojection error: 26.6px -- a
+# real fit, not a placeholder, but higher than a well-tuned calibration
+# should be (ideally <1-2px); treat as a solid first pass, not final.
+# Re-run scripts/calibration (see README.md's Calibration section) with
+# more images and/or better lighting/focus to improve if tracking quality
+# isn't sufficient.
+#
+# Basalt KannalaBrandt8 (kb4) camera-only intrinsics, from a fresh AprilGrid
+# calibration at the widened 1920->800 crop/resolution (full lens circle,
+# no margin trim -- see main.cc's kBoundingBoxOrigin/kSlamFrameSize
+# comment for why). Reprojection error 0.50px. This fit's own monotonic
+# (physically valid) equidistant range is theta<=103.1deg -- narrower than
+# the previous 640-resolution fit's ~120.8deg, which is why
+# main.cc's kMaskRadiusPx is 370 (not the full 400px inscribed circle);
+# re-verify that range (see calibration/README.md) if these coefficients
+# change.
+Camera1.fx: 214.0900
+Camera1.fy: 214.1310
+Camera1.cx: 396.5260
+Camera1.cy: 399.5260
 
-# PLACEHOLDER equidistant (Kannala-Brandt) distortion coefficients.
-Camera1.k1: 0.0
-Camera1.k2: 0.0
-Camera1.k3: 0.0
-Camera1.k4: 0.0
+# Kannala-Brandt equidistant distortion coefficients from the same
+# calibration.
+Camera1.k1: 0.0925616
+Camera1.k2: -0.0371436
+Camera1.k3: 0.0156295
+Camera1.k4: -0.0037079
 
-# Camera resolution -- must match LiveStreamParam.video_resolution in main.cc
-# (RES_1920_960P30).
-Camera.width: 1920
-Camera.height: 960
+# Camera resolution -- must match main.cc's slam_frame pipeline: full
+# 1920x1920 lens circle (no crop/margin trim), resized to 800x800.
+Camera.width: 800
+Camera.height: 800
 
 Camera.fps: 30
 
@@ -48,44 +95,96 @@ Camera.fps: 30
 # changes, update this too.
 Camera.RGB: 0
 
-# PLACEHOLDER transformation from the IMU's body frame to the camera frame.
-# Requires an actual camera-IMU extrinsic calibration against the real
-# Insta360 unit (e.g. via Kalibr) -- there is no vendor-supplied value for
-# this. Identity rotation + zero translation is almost certainly wrong;
-# treat any tracking result before this is calibrated as unreliable.
+# Real camera-to-IMU extrinsic from Basalt's basalt_calibrate_imu, phase-1
+# result (see the file-header comment above for why phase 1 rather than the
+# final saved output). Translation is in meters; ~16.5cm/12.8cm/-2.2cm
+# offset between the camera lens and the IMU package, a plausible order of
+# magnitude for this rig's physical layout. Unaffected by the 640->800
+# crop/resolution widen above -- this describes the physical camera-IMU
+# relationship, independent of how the image is cropped/resized. Two
+# further attempts at a scale-refined replacement (one at 800res) both
+# got stuck at a much worse reprojection (~9-26px) than this result's
+# 0.66px and were discarded; this remains the best extrinsic available.
 IMU.T_b_c1: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
-   data: [1.0, 0.0, 0.0, 0.0,
-          0.0, 1.0, 0.0, 0.0,
-          0.0, 0.0, 1.0, 0.0,
-          0.0, 0.0, 0.0, 1.0]
+   data: [-0.0243852,  0.9996430,  0.0109582, -0.165386,
+           0.0018413, -0.0109166,  0.9999390,  0.127618,
+           0.9997010,  0.0244039, -0.0015744, -0.022312,
+           0.0,        0.0,        0.0,        1.0]
 
-# PLACEHOLDER IMU noise parameters (values below are VINS-Mono's generic
-# defaults, same starting point RealSense_D435i.yaml/TUM-VI.yaml use --
-# NOT measured against the Insta360's actual IMU). IMU.Frequency in
-# particular must match whatever rate OnGyroData actually delivers samples
-# at on the real camera; confirm and correct.
+# Real IMU noise parameters, measured via Allan deviation (allantools
+# oadev, data_type="freq") on a 213s stationary recording (camera on a
+# still surface, --no-slam --record) of the actual Insta360 X3 IMU --
+# replaces the generic VINS-Mono placeholder defaults. NoiseGyro/NoiseAcc
+# (white noise / angle-velocity random walk) are solid AS A STATIONARY
+# measurement: the Allan deviation log-log slope came out within ~2% of
+# the theoretical -0.5 across all 3 axes of both sensors. GyroWalk/AccWalk
+# (bias random walk) are much less certain even stationary -- a proper
+# random-walk region needs a much longer stationary recording (tens of
+# minutes to hours) to show its characteristic +0.5 slope; at 213s the fit
+# found slopes nowhere near +0.5, so these two were already a rough
+# approximation, not a confident measurement.
+#
+# All four values below are inflated (Noise x5, Walk x8) beyond the raw
+# stationary measurement: a handheld/teleop rig undergoes real vibration
+# and motion-induced sensor noise that a still-surface recording can't
+# capture, and ORB-SLAM3's inertial optimizer (EdgeInertial/EdgeInertialGS
+# in G2oTypes.cc) trusts IMU residuals in inverse proportion to these
+# values -- too-tight noise estimates make it overconfident in a noisier-
+# than-modeled signal, which was confirmed via gdb on real hardware to let
+# a Levenberg-Marquardt bias-vertex update run away far enough to break
+# IMU::Preintegrated::GetDeltaRotation's first-order bias-correction
+# linearization (crashed as "Sophus SO3::exp failed! omega: nan nan nan"
+# in EdgeInertialGS::computeError / PoseInertialOptimizationLastFrame)
+# during aggressive real-hardware motion testing. This is a real fix to
+# how the optimizer uses IMU data (trusting it exactly as much as it
+# actually deserves under real usage), not a crash guard. Re-tune (or
+# record a stationary-vs-dynamic comparison and derive a principled
+# inflation factor) if tracking accuracy suffers from being too
+# conservative. Values below are the max across x/y/z (conservative).
+# IMU.Frequency is the real measured rate.
 IMU.InsertKFsWhenLost: 0
-IMU.NoiseGyro: 1e-3   # rad/s^0.5
-IMU.NoiseAcc: 1e-2    # m/s^1.5
-IMU.GyroWalk: 1e-6    # rad/s^1.5
-IMU.AccWalk: 1e-4     # m/s^2.5
-IMU.Frequency: 200.0  # PLACEHOLDER -- confirm against the real OnGyroData rate
+IMU.NoiseGyro: 8.429130e-04   # rad/s/sqrt(Hz) (5x stationary measurement)
+IMU.NoiseAcc: 2.011808e-02    # m/s^2/sqrt(Hz) (5x stationary measurement)
+IMU.GyroWalk: 6.339842e-04    # rad/s^2/sqrt(Hz) (8x stationary measurement, already rough -- see comment above)
+IMU.AccWalk: 7.626927e-03     # m/s^3/sqrt(Hz) (8x stationary measurement, already rough -- see comment above)
+IMU.Frequency: 318.7  # measured from OnGyroData batch timestamps (main.cc)
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters
 #--------------------------------------------------------------------------------------------
-ORBextractor.nFeatures: 1250
+# Tried reducing to 800/6 levels to ease per-frame ORB extraction cost
+# (hoping to reduce brief motion-triggered freezes) -- verified against
+# real hardware that this instead broke initialization entirely (0 OK
+# poses in a 30s test, vs ~80% success at these original values), almost
+# certainly by pushing detected keypoint counts below ORB_SLAM3's ~100
+# threshold within the already-small masked circular region. Reverted.
+#
+# Increased nFeatures 1250->2000 to reduce "Fail to track local map!"
+# resets (the dominant reset cause in real live testing -- 7 of 10 in one
+# session): more candidate features directly means more robust matching
+# against the local map. Feasible now specifically because main.cc's SLAM
+# thread is gyro-batch-driven (~10Hz effective processing, see its
+# comment) rather than the old ~30fps frame-driven trigger, leaving much
+# more CPU headroom per processed frame than when 1250 was originally
+# tuned. Revert toward 1250 if this reintroduces the freezing the 800/6
+# attempt above was trying to avoid.
+ORBextractor.nFeatures: 2000
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 7
 
 #--------------------------------------------------------------------------------------------
-# Viewer Parameters (unused; main.cc constructs System with use_viewer=false)
+# Viewer Parameters (only used when insta360_bridge is run with --viewer)
 #--------------------------------------------------------------------------------------------
+# Scales the "Current Frame" display window relative to the native
+# 640x640 SLAM crop (see main.cc) -- display-only, does not affect
+# tracking resolution/quality. 640 is already a reasonable window size.
+Viewer.imageViewScale: 1.0
+
 Viewer.KeyFrameSize: 0.05
 Viewer.KeyFrameLineWidth: 1.0
 Viewer.GraphLineWidth: 0.9

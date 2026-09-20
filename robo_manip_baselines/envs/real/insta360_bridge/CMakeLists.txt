@@ -8,6 +8,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(OpenCV REQUIRED)
+find_package(Eigen3 3.1.0 REQUIRED)
+find_package(Pangolin REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
@@ -32,7 +34,7 @@ endif()
 # separately first per its own README (produces lib/libORB_SLAM3.so and its
 # bundled Thirdparty/{DBoW2,g2o}/lib/*.so) -- this project only links
 # against that already-built output, it does not build ORB-SLAM3 itself.
-set(ORB_SLAM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/ORB_SLAM3)
+set(ORB_SLAM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/ORB_SLAM3)
 if(NOT EXISTS ${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so)
   message(FATAL_ERROR
     "third_party/ORB_SLAM3 has not been built yet (expected "
@@ -46,14 +48,14 @@ add_executable(insta360_bridge
   BridgeServer.cc
 )
 
-# Off by default: only enable once confirmed against the real SDK header
-# that ins_camera::GyroData actually carries accelerometer samples -- see
-# README.md's "Known unresolved risk" and main.cc's INSTA360_GYRO_HAS_ACCEL
-# usage. `cmake -B build -DINSTA360_GYRO_HAS_ACCEL=ON` to turn it on.
-option(INSTA360_GYRO_HAS_ACCEL "GyroData includes accelerometer samples" OFF)
-if(INSTA360_GYRO_HAS_ACCEL)
-  target_compile_definitions(insta360_bridge PRIVATE INSTA360_GYRO_HAS_ACCEL=1)
-endif()
+# On by default: verified against real hardware (Insta360 X3, fw v1.0.83,
+# SDK 2.1.8) that OnGyroData fires with real accel+gyro data when the camera
+# is physically set to dual-lens (360) capture mode via its own screen -- see
+# main.cc's INSTA360_GYRO_HAS_ACCEL comment. `-DINSTA360_GYRO_HAS_ACCEL=OFF`
+# forces the IMU-less fallback.
+option(INSTA360_GYRO_HAS_ACCEL "GyroData includes accelerometer samples" ON)
+target_compile_definitions(insta360_bridge PRIVATE
+  INSTA360_GYRO_HAS_ACCEL=$<BOOL:${INSTA360_GYRO_HAS_ACCEL}>)
 
 target_include_directories(insta360_bridge PRIVATE
   ${INSTA360_SDK_DIR}/include
@@ -62,6 +64,8 @@ target_include_directories(insta360_bridge PRIVATE
   ${ORB_SLAM3_DIR}/include/CameraModels
   ${ORB_SLAM3_DIR}/Thirdparty/Sophus
   ${OpenCV_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIR}
+  ${Pangolin_INCLUDE_DIRS}
 )
 
 target_link_directories(insta360_bridge PRIVATE
@@ -80,6 +84,7 @@ target_link_libraries(insta360_bridge PRIVATE
   DBoW2
   g2o
   ${OpenCV_LIBS}
+  ${Pangolin_LIBRARIES}
   PkgConfig::AVCODEC
   PkgConfig::AVUTIL
   PkgConfig::SWSCALE
