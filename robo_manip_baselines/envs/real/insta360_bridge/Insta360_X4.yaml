@@ -5,32 +5,57 @@
 # Camera1.fx/fy/cx/cy/k1-k4 and IMU.T_b_c1 below are from a real Basalt
 # camera-IMU calibration (KannalaBrandt8/kb4, AprilGrid target, 22mm tags) --
 # see envs/real/insta360_bridge/README.md's "Calibration" section for the
-# full pipeline. IMU.T_b_c1 is taken from basalt_calibrate_imu's phase-1
+# full pipeline.
+#
+# RECALIBRATED (2026-10-04) for a SECOND, physically different Insta360 X3
+# unit -- the values below replace a prior calibration done against the
+# first unit. This second unit needed its own fix first: it did not
+# override main.cc's requested LiveStreamParam.video_resolution the way
+# the first unit did, so it was delivering a square single-lens
+# RES_2880_2880P30 frame instead of the real 3840x1920 dual-fisheye one
+# until main.cc was changed to request RES_3840_1920P30 explicitly (see
+# that file's LiveStreamParam comment and README.md).
+#
+# Camera-only intrinsics (basalt_calibrate, kb4): two calibration sweeps
+# were recorded; both gave consistent, good intrinsics (0.48px and 0.53px
+# mean reprojection respectively, fx/fy/cx/cy/k1-k4 within ~0.3% of each
+# other) -- intrinsics don't depend on rotational excitation, so this
+# agreement is expected and the first sweep's slightly better 0.48px fit
+# is used below. Re-verified this fit's equidistant model stays
+# monotonically increasing over the FULL theta in [0, 90deg] range (unlike
+# the first unit's fits, which were only valid to ~103-120deg out of a
+# possible larger range) -- main.cc's kMaskRadiusPx did not need any
+# change for this.
+#
+# Camera-IMU extrinsic (basalt_calibrate_imu): IMU.T_b_c1 is phase 1's
 # result (extrinsics + bias + gravity only, accel/gyro scale held at
-# identity) rather than its final saved output: with --no-gui,
-# calibrate_imu.cpp unconditionally runs a second phase
-# (setOptImuScale(true)) that refines the 3x3 accel/gyro scale matrices, but
-# on our recorded sweep this phase was under-excited (not enough real
-# translational acceleration to make scale observable) and converged to a
-# degenerate near-zero solution (accel_scale diag ~0.1, gravity norm ~0.93
-# m/s^2 instead of ~9.8) -- confirmed by the fact this reduces the
-# optimizer's own total cost, i.e. it's a real local/global minimum of an
-# ill-posed problem, not a numerical bug. Phase 1 alone (before scale
-# refinement kicks in) gave gravity norm 9.58 m/s^2 (98% of real 9.81) with
-# 0.66px mean reprojection and physically plausible T_i_c0 -- extracted by
-# hand from that phase's log output since basalt_calibrate_imu --no-gui only
-# writes calibration.json after all phases (incl. the broken one) complete.
-# Re-run the IMU calibration with a more aggressively-excited sweep (fast
-# shakes/translations in multiple directions, not just smooth pans) if a
-# GUI-converged, scale-refined result is needed later -- tried once more
-# with a larger, more varied real sweep (5423 frames, wide distance
-# variation from close-up to full-room pull-back) specifically for this,
-# but it broke the joint camera-IMU initial trajectory estimation instead
-# (stuck at ~30px reprojection, no real optimizer progress); that sweep's
-# camera-only intrinsics converged fine regardless and are used above.
-# IMU noise parameters below are now real measured values (see their own
-# comment), no longer placeholders. IMU.Frequency reflects the real
-# measured gyro rate (~318.7 Hz from OnGyroData batch timestamps).
+# identity), same reasoning as before -- with --no-gui, calibrate_imu.cpp
+# unconditionally runs a second phase (setOptImuScale(true)) that, on
+# every sweep tried for the first unit AND both sweeps tried for this
+# second unit, either collapsed to a degenerate near-zero/wrong-gravity
+# scale or diverged outright (accel_bias in the thousands, gravity norm
+# in the thousands) -- so phase 1's result, extracted by hand from that
+# phase's log output, remains the only usable one; calibrate_imu.cpp
+# --no-gui only writes calibration.json after all phases (incl. the
+# broken ones) complete. Two sweeps were tried for this second unit: the
+# first (145s, 4367 frames, moderate rotation) gave phase 1 gravity norm
+# 10.15 m/s^2 (3.5% off real 9.81) with 15.0px mean reprojection; a
+# second, longer sweep (243s, 7290 frames) with MORE deliberate/faster
+# 3-axis rotation -- intended to improve on that -- instead diverged
+# outright during phase 1 itself (reprojection climbed past 90px, gravity
+# norm into the thousands) and was abandoned; the first sweep's milder
+# result is used below. 15.0px reprojection is noticeably worse than the
+# 0.66px achieved for the first unit's T_b_c1 -- treat this extrinsic as
+# a usable-but-rougher first pass, and re-attempt with a fresh sweep
+# (varied but not overly fast/jerky rotation, across the whole frame) if
+# tracking quality with this unit suffers from it.
+#
+# IMU noise parameters below are UNCHANGED from the first unit's real
+# Allan-deviation measurements (see their own comment) -- not re-measured
+# against this second unit's actual IMU, just carried over as a
+# reasonable same-model approximation. IMU.Frequency is likewise still
+# the first unit's measured rate; re-measure both if this unit's IMU
+# characteristics turn out to differ meaningfully.
 #
 # Structure confirmed against ORB-SLAM3's own
 # Examples/Monocular-Inertial/TUM-VI.yaml (a real fisheye + IMU example, same
@@ -62,26 +87,25 @@ Camera.type: "KannalaBrandt8"
 # more images and/or better lighting/focus to improve if tracking quality
 # isn't sufficient.
 #
-# Basalt KannalaBrandt8 (kb4) camera-only intrinsics, from a fresh AprilGrid
-# calibration at the widened 1920->800 crop/resolution (full lens circle,
-# no margin trim -- see main.cc's kBoundingBoxOrigin/kSlamFrameSize
-# comment for why). Reprojection error 0.50px. This fit's own monotonic
-# (physically valid) equidistant range is theta<=103.1deg -- narrower than
-# the previous 640-resolution fit's ~120.8deg, which is why
-# main.cc's kMaskRadiusPx is 370 (not the full 400px inscribed circle);
-# re-verify that range (see calibration/README.md) if these coefficients
-# change.
-Camera1.fx: 214.0900
-Camera1.fy: 214.1310
-Camera1.cx: 396.5260
-Camera1.cy: 399.5260
+# Basalt KannalaBrandt8 (kb4) camera-only intrinsics for the SECOND
+# Insta360 X3 unit (see file header), from the first of two calibration
+# sweeps at the 1920->800 crop/resolution (full lens circle, no margin
+# trim -- see main.cc's kBoundingBoxOrigin/kSlamFrameSize comment for
+# why). Reprojection error 0.48px. This fit's equidistant range is
+# monotonic (physically valid) over the full theta in [0, 90deg] --
+# main.cc's kMaskRadiusPx (370px) stays well within that, no change
+# needed.
+Camera1.fx: 215.0920
+Camera1.fy: 215.3090
+Camera1.cx: 400.4080
+Camera1.cy: 397.5860
 
 # Kannala-Brandt equidistant distortion coefficients from the same
 # calibration.
-Camera1.k1: 0.0925616
-Camera1.k2: -0.0371436
-Camera1.k3: 0.0156295
-Camera1.k4: -0.0037079
+Camera1.k1: 0.0885139
+Camera1.k2: -0.0344811
+Camera1.k3: 0.0145533
+Camera1.k4: -0.00349882
 
 # Camera resolution -- must match main.cc's slam_frame pipeline: full
 # 1920x1920 lens circle (no crop/margin trim), resized to 800x800.
@@ -95,24 +119,24 @@ Camera.fps: 30
 # changes, update this too.
 Camera.RGB: 0
 
-# Real camera-to-IMU extrinsic from Basalt's basalt_calibrate_imu, phase-1
-# result (see the file-header comment above for why phase 1 rather than the
-# final saved output). Translation is in meters; ~16.5cm/12.8cm/-2.2cm
-# offset between the camera lens and the IMU package, a plausible order of
-# magnitude for this rig's physical layout. Unaffected by the 640->800
-# crop/resolution widen above -- this describes the physical camera-IMU
-# relationship, independent of how the image is cropped/resized. Two
-# further attempts at a scale-refined replacement (one at 800res) both
-# got stuck at a much worse reprojection (~9-26px) than this result's
-# 0.66px and were discarded; this remains the best extrinsic available.
+# Real camera-to-IMU extrinsic for the SECOND Insta360 X3 unit (see file
+# header), from Basalt's basalt_calibrate_imu, phase-1 result (see the
+# file-header comment above for why phase 1 rather than the final saved
+# output, and for this result's rougher 15.0px reprojection vs the first
+# unit's 0.66px). Translation is in meters; ~24.4cm/-8.1cm/0.4cm offset
+# between the camera lens and the IMU package -- a plausible order of
+# magnitude for this rig's physical layout, though the first unit's
+# translation was quite different (~16.5/12.8/-2.2cm), consistent with
+# these being two separate physical units with different IMU-package
+# placement, not a sign of error.
 IMU.T_b_c1: !!opencv-matrix
    rows: 4
    cols: 4
    dt: f
-   data: [-0.0243852,  0.9996430,  0.0109582, -0.165386,
-           0.0018413, -0.0109166,  0.9999390,  0.127618,
-           0.9997010,  0.0244039, -0.0015744, -0.022312,
-           0.0,        0.0,        0.0,        1.0]
+   data: [-0.071596,   0.997088,   0.0262729,  0.244089,
+          -0.00591342, -0.0267643, 0.999624,  -0.08057,
+           0.997416,   0.0714138,  0.00781242, 0.00423873,
+           0.0,         0.0,       0.0,        1.0]
 
 # Real IMU noise parameters, measured via Allan deviation (allantools
 # oadev, data_type="freq") on a 213s stationary recording (camera on a

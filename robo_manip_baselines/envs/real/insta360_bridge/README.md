@@ -41,6 +41,19 @@ before this and are now confirmed:
   confirmed via its screen; consistently `3840x1920` after) -- if you see a
   different resolution, verify the camera's on-screen mode/resolution
   setting first.
+- **A second physical Insta360 X3 unit delivered a genuinely square
+  `2880x2880` frame** (confirmed via `main.cc`'s one-time "Decoded frame
+  size" startup log line) even with the on-camera mode set to dual-lens/
+  "360" and after a power cycle -- unlike the first unit, this one
+  actually honored `main.cc`'s `LiveStreamParam.video_resolution` request
+  at face value instead of ignoring it in favor of its native 3840x1920.
+  `main.cc` requests `RES_3840_1920P30` directly for exactly this reason
+  (previously requested the lower `RES_1920_960P30` "preview" resolution,
+  relying on the first unit's override behavior) -- confirmed fixed on
+  the second unit and harmless on the first (which already always
+  delivered 3840x1920 regardless of the request). If a frame still comes
+  back square, re-check the camera's on-screen Camera Mode setting and
+  try a power cycle before suspecting the code.
 - **`ins_camera::GyroData::ax/ay/az` are in units of g (9.80665 m/s^2), not
   m/s^2** -- confirmed via `ai4ce/insta360_ros_driver`'s `OnGyroData`, which
   multiplies by standard gravity before publishing as `sensor_msgs/Imu`

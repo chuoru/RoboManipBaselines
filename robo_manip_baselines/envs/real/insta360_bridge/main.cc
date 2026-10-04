@@ -72,6 +72,44 @@ struct ImuSample {
   float accel[3];
 };
 
+// Measured, NOT guessed: an offline cross-correlation analysis (sparse
+// Lucas-Kanade optical-flow rotation-rate proxy from recorded video vs.
+// gyro-magnitude sqrt(gx^2+gy^2+gz^2) from the paired IMU CSV, both
+// resampled to 100Hz and cross-correlated over +/-500ms) run on two
+// SEPARATE real recordings found video frame timestamps (as captured by
+// OnVideoData below, at raw encoded-bytes-over-USB receipt time) running
+// systematically LATE relative to IMU timestamps for the same physical
+// motion event: best lag = +230ms on a 4367-frame/146s recording (corr
+// 0.713) and +220ms on an independent 7290-frame/252s recording (corr
+// 0.737) -- both clean, graded correlation peaks, agreeing to within
+// 10ms. Believed root cause: the camera's own internal
+// capture->H.264/H.265-encode->USB-delivery pipeline latency on the VIDEO
+// path (typical 100-300ms for action cameras), which the gyro/IMU path
+// (see OnGyroData) apparently doesn't share to the same degree -- NOT the
+// OnGyroData batch-interpolation logic, which was separately analyzed and
+// can only produce ~2-5ms worst-case timing error, two orders of
+// magnitude too small to explain this.
+//
+// kVideoLatencyCompensationSec is the simple mean of the two measured
+// lags (230ms + 220ms) / 2 = 225ms -- a principled single-number choice
+// given both measurements independently agree to within 10ms of each
+// other and of this mean, rather than picking either one over the other.
+// Subtracted from every frame's receipt timestamp in OnVideoData (the one
+// place both the SLAM-feeding path and the --no-slam raw broadcast path
+// originate their timestamp from) so frame and IMU timestamps both
+// represent real-world event time consistently. This is a CONSTANT shift
+// applied uniformly to every frame, so it preserves monotonicity/ordering
+// of frame timestamps exactly as before (see the pending_frames ordering
+// check in main()'s slam_thread) -- it does not need per-frame/per-camera
+// calibration beyond this constant. May not generalize exactly to a
+// different physical camera unit/firmware than the one these two
+// recordings were made on (see README.md's resolution-instability note
+// about a second X3 unit behaving differently in other respects); if a
+// live re-verification (see verify_sync_fix.md in the scratchpad) shows a
+// meaningfully different lag on that other unit, this constant should be
+// re-measured for it rather than assumed to transfer.
+constexpr double kVideoLatencyCompensationSec = 0.225;
+
 // Bridges the CameraSDK's async StreamDelegate callbacks into simple
 // queues the main loop below can drain each iteration -- same reasoning as
 // RealEnvBase's various background-thread/queue sensor setups (e.g.
@@ -137,7 +175,15 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
     // time), not when decode_thread_ later actually decodes it, since
     // decoding may now be delayed under load and the timestamp must still
     // reflect real capture/arrival time.
-    const double receipt_time_sec = WallClockSeconds();
+    //
+    // kVideoLatencyCompensationSec (see its own comment above) is
+    // subtracted here, at the single point both the SLAM-feeding and
+    // --no-slam/--record raw-broadcast paths originate their frame
+    // timestamp from, to correct for camera-side encode/USB latency
+    // measured (via cross-correlation against gyro) to run this far
+    // behind real-world event time relative to the IMU path.
+    const double receipt_time_sec =
+        WallClockSeconds() - kVideoLatencyCompensationSec;
     {
       std::lock_guard<std::mutex> lock(raw_video_mutex_);
       raw_video_queue_.emplace_back(std::vector<uint8_t>(data, data + size),
@@ -169,6 +215,16 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
       }
       cv::Mat frame;
       if (decoder_.Decode(data.data(), data.size(), frame)) {
+        static bool logged_frame_size = false;
+        if (!logged_frame_size) {
+          logged_frame_size = true;
+          std::cout << "[insta360_bridge] Decoded frame size: " << frame.cols
+                    << "x" << frame.rows
+                    << " (expect ~3840x1920 dual-fisheye in 360 mode; a "
+                       "square size here means the camera is actually in "
+                       "single-lens mode regardless of what its menu says)"
+                    << std::endl;
+        }
         std::lock_guard<std::mutex> lock(frame_mutex_);
         latest_frame_ = frame;
         latest_frame_timestamp_sec_ = receipt_time_sec;
@@ -392,6 +448,20 @@ class BridgeStreamDelegate : public ins_camera::StreamDelegate {
   // fabricating synthetic samples (tried and reverted -- see that
   // function's comment) or accepting empty preintegration windows.
   // Returns -1 before any gyro data has arrived (see HasReceivedAnyGyroData).
+  //
+  // Interaction with kVideoLatencyCompensationSec: frame timestamps (see
+  // OnVideoData) are now backdated by ~225ms relative to this watermark's
+  // clock (gyro timestamps are unaffected -- only the video side is
+  // compensated), so a frame typically satisfies
+  // `pending_frames.front().second <= watermark_sec` (see main()'s
+  // slam_thread) sooner than before the fix, since 225ms exceeds the
+  // normal ~100-170ms gyro batch interval this buffering was absorbing.
+  // This is intentional/correct, not a side effect to work around: it
+  // reflects that a given frame's TRUE capture time is now known to
+  // already be in the past relative to wall-clock receipt, so IMU
+  // coverage reaching it was already more available than the
+  // pre-compensation timestamp implied. Buffering still exists for the
+  // (now rarer) case where it doesn't.
   double GetImuWatermarkSec() {
     std::lock_guard<std::mutex> lock(imu_mutex_);
     return last_gyro_batch_wall_clock_sec_;
@@ -678,12 +748,24 @@ int main(int argc, char** argv) {
   // an SDK call. Re-verify against real hardware: if this camera isn't
   // already in dual-lens mode, gyro delivery may need that manual step.
   ins_camera::LiveStreamParam stream_param;
-  // README's recommended preview resolution -- also keeps the video single-
-  // stream (< 5.7K), see BridgeStreamDelegate::OnVideoData. In practice
-  // (dual-lens/360 mode), the camera ignores this and delivers 3840x1920
-  // regardless -- see the resolution-instability note in README.md.
-  stream_param.video_resolution = ins_camera::VideoResolution::RES_1920_960P30;
-  stream_param.lrv_video_resulution = ins_camera::VideoResolution::RES_1920_960P30;
+  // Explicitly request the real target dual-fisheye resolution rather
+  // than a lower "preview" one. On the original camera unit used through
+  // most of this file's development, requesting a lower resolution
+  // (RES_1920_960P30, the README's old recommendation) didn't matter --
+  // in dual-lens/360 mode that camera ignored the request and delivered
+  // 3840x1920 regardless (see the resolution-instability note in
+  // README.md). A SECOND physical Insta360 X3 unit did NOT reproduce that
+  // override: confirmed via gdb/a one-time decoded-frame-size log print,
+  // it instead genuinely honored the literal RES_1920_960P30 request by
+  // falling back to a totally different, square RES_2880_2880P30-shaped
+  // single-lens frame -- even with the on-camera "Camera Mode" menu set
+  // to dual-lens/360 and the camera power-cycled. Requesting the actual
+  // target resolution directly fixed it on that second unit (confirmed:
+  // decoded frame became the correct 3840x1920) and is harmless on the
+  // first unit (already always delivered 3840x1920 regardless of what
+  // was requested, so asking for it explicitly changes nothing there).
+  stream_param.video_resolution = ins_camera::VideoResolution::RES_3840_1920P30;
+  stream_param.lrv_video_resulution = ins_camera::VideoResolution::RES_3840_1920P30;
   // 512kbps (1024*1024/2) was sized for the requested-but-not-actually-
   // delivered 1920x960 preview; verified against real hardware that at the
   // real 3840x1920 delivered resolution this is far too low, causing
@@ -756,6 +838,14 @@ int main(int argc, char** argv) {
   // header "timestamp_ms,sensor_type,x,y,z", one gyro row then one accel
   // row per sample sharing the same timestamp -- mono_inertial_video.cc's
   // LoadIMUCsv requires exactly that pairing/order).
+  //
+  // Frame timestamps recorded from here on already have
+  // kVideoLatencyCompensationSec subtracted (applied once, at the source,
+  // in OnVideoData) -- any recording made BEFORE that change (e.g. the
+  // sweep1/sweep2 calibration recordings this constant was itself derived
+  // from) does NOT have this correction baked in, so do not mix
+  // pre-/post-fix recordings when re-running the cross-correlation
+  // verification or feeding mono_inertial_video.
   cv::VideoWriter record_writer;
   std::ofstream record_csv;
   bool record_csv_header_written = false;
