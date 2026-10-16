@@ -30,6 +30,8 @@ class ViveInputDevice(InputDeviceBase):
     # If no new pose has arrived from libsurvive within this many seconds, the
     # tracker is treated as lost (out of lighthouse view, powered off, etc.).
     TRACKING_TIMEOUT = 0.5  # [s]
+    # Max time [s] to wait for libsurvive to shut down in close() (see there).
+    CLOSE_TIMEOUT = 3.0
 
     # A tracker's pose is noisy for a brief moment right after it's first seen
     # (libsurvive's MPFIT pose solver hasn't converged yet -- this is worse right
@@ -267,7 +269,24 @@ class ViveInputDevice(InputDeviceBase):
         with ViveInputDevice._shared_context_lock:
             ViveInputDevice._shared_context_refcount -= 1
             if ViveInputDevice._shared_context_refcount <= 0:
-                self.pysurvive.simple_close(ViveInputDevice._shared_context.ptr)
+                # simple_close() can block forever inside libsurvive (observed
+                # when quitting while the tracker had not yet seen any
+                # lighthouse): the main thread sat in native code, ignoring
+                # Ctrl+C, so the env -- and the robot connection -- never got
+                # closed. Run it in a daemon thread and give up after a
+                # timeout; libsurvive's threads die with the process anyway.
+                close_thread = threading.Thread(
+                    target=self.pysurvive.simple_close,
+                    args=(ViveInputDevice._shared_context.ptr,),
+                    daemon=True,
+                )
+                close_thread.start()
+                close_thread.join(timeout=self.CLOSE_TIMEOUT)
+                if close_thread.is_alive():
+                    print(
+                        f"[{self.__class__.__name__}] libsurvive did not shut down "
+                        f"within {self.CLOSE_TIMEOUT:.0f}s; continuing without it."
+                    )
                 ViveInputDevice._shared_context = None
                 ViveInputDevice._shared_context_refcount = 0
                 ViveInputDevice._object_registry = {}

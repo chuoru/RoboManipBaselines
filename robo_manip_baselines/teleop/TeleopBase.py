@@ -2,6 +2,7 @@ import argparse
 import datetime
 import os
 import sys
+import threading
 import time
 from abc import ABC
 
@@ -22,6 +23,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pylab as plt
 import numpy as np
+import psutil
 import yaml
 
 from robo_manip_baselines.common import (
@@ -558,6 +560,16 @@ class TeleopBase(OperationDataMixin, ABC):
             self.phase_manager.post_update()
 
             self.key = cv2.waitKey(1)
+            if self.phase_manager.is_phases(["TeleopPhase"]) and self._is_memory_low():
+                # Recorded frames are held in RAM until the episode is saved;
+                # finish the episode (as if 'n' were pressed) before the OS
+                # OOM-kills the process and the whole episode is lost.
+                print(
+                    f"[{self.__class__.__name__}] Available memory is below "
+                    f"{self.MIN_AVAILABLE_MEMORY_GB:.1f} GB -- finishing teleoperation "
+                    "automatically. Keep episodes shorter."
+                )
+                self.key = ord("n")
             self.phase_manager.check_transition()
 
             if self.key == 27:  # escape key
@@ -574,6 +586,15 @@ class TeleopBase(OperationDataMixin, ABC):
             target_duration = self.get_target_duration()
             if (not self.auto_mode) and (iteration_duration < target_duration):
                 time.sleep(target_duration - iteration_duration)
+
+    # Minimum available system memory [GB] while recording; see main_loop().
+    MIN_AVAILABLE_MEMORY_GB = 1.5
+
+    def _is_memory_low(self):
+        return (
+            psutil.virtual_memory().available
+            < self.MIN_AVAILABLE_MEMORY_GB * 1024**3
+        )
 
     def get_target_duration(self):
         # During replay, pace each step by the wall-clock gap recorded at teleop
@@ -640,16 +661,22 @@ class TeleopBase(OperationDataMixin, ABC):
                 self.replay_data_manager.get_single_data(abs_key, 0),
             )
 
-    def save_data(self):
-        filename = os.path.normpath(
+    def get_save_filename(self):
+        # The operation may set self.dataset_dir (e.g. from its env config's
+        # dataset_dir) to save somewhere other than the repo's dataset/.
+        dataset_dir = getattr(self, "dataset_dir", None)
+        if dataset_dir is None:
+            dataset_dir = os.path.join(os.path.dirname(__file__), "..", "dataset")
+        return os.path.normpath(
             os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "dataset",
+                os.path.expanduser(dataset_dir),
                 f"{self.demo_name}_{self.datetime_now:%Y%m%d_%H%M%S}",
                 f"{self.demo_name}_world{self.data_manager.world_idx:0>1}_{self.data_manager.episode_idx:0>3}.{self.args.file_format}",
             )
         )
+
+    def save_data(self):
+        filename = self.get_save_filename()
         self.data_manager.save_data(filename)
         print(f"[{self.__class__.__name__}] Save the data as {filename}")
 
@@ -716,9 +743,18 @@ class TeleopBase(OperationDataMixin, ABC):
         cv2.imshow("image", cv2.cvtColor(window_image, cv2.COLOR_RGB2BGR))
 
     VIVE_TRAIL_MAXLEN = 200  # ~6 s at 30 Hz
+    # The matplotlib 3D panel is rendered in a background thread at most this
+    # often [s]; draw_image() only grabs the latest rendered image. A full
+    # Agg redraw costs ~60-150 ms, which inline capped the recording loop
+    # well below 10 Hz and (when merely throttled) still caused periodic
+    # loop-period spikes, i.e. irregular sampling in the recorded data.
+    VIVE_PANEL_REDRAW_INTERVAL = 0.2
 
     def _draw_vive_pose_panel(self, height):
-        """Render a headless matplotlib 3D Vive-tracker pose panel and return a BGR image."""
+        """Return the latest headless matplotlib 3D Vive-tracker pose panel as a BGR image.
+
+        The trail is appended here every frame; the rendering itself runs in a
+        background thread (see VIVE_PANEL_REDRAW_INTERVAL)."""
         from .ViveInputDevice import ViveInputDevice
 
         vive_dev = next(
@@ -728,35 +764,82 @@ class TeleopBase(OperationDataMixin, ABC):
         if vive_dev is None:
             return None
 
-        # Lazy-init headless figure (FigureCanvasAgg → no window opened)
-        if not hasattr(self, "_vive_fig"):
-            from matplotlib.figure import Figure
-            from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-            dpi = 72
-            size_in = height / dpi
-            self._vive_fig = Figure(figsize=(size_in, size_in), dpi=dpi)
-            self._vive_canvas = FigureCanvasAgg(self._vive_fig)
-            self._vive_ax = self._vive_fig.add_subplot(111, projection="3d")
+        if not hasattr(self, "_vive_panel_thread"):
+            self._vive_panel_lock = threading.Lock()
             self._vive_pos_trail = []
-
-        ax = self._vive_ax
-        ax.clear()
+            self._vive_panel_snapshot = None
+            self._vive_panel_cache = None
+            self._vive_panel_thread = threading.Thread(
+                target=self._vive_pose_panel_loop, args=(height,), daemon=True
+            )
+            self._vive_panel_thread.start()
 
         state = getattr(vive_dev, "state", None)
-        if state is not None:
-            pos = state["se3"].translation.copy()
-            rot = state["se3"].rotation
-            self._vive_pos_trail.append(pos)
-            if len(self._vive_pos_trail) > self.VIVE_TRAIL_MAXLEN:
-                self._vive_pos_trail.pop(0)
-        else:
-            pos = rot = None
+        with self._vive_panel_lock:
+            if state is not None:
+                pos = state["se3"].translation.copy()
+                rot = state["se3"].rotation.copy()
+                self._vive_pos_trail.append(pos)
+                if len(self._vive_pos_trail) > self.VIVE_TRAIL_MAXLEN:
+                    self._vive_pos_trail.pop(0)
+            else:
+                pos = rot = None
+            vive_se3_at_enable = getattr(vive_dev, "vive_se3_at_enable", None)
+            self._vive_panel_snapshot = {
+                "trail": list(self._vive_pos_trail),
+                "pos": pos,
+                "rot": rot,
+                "anchor": (
+                    None
+                    if vive_se3_at_enable is None
+                    else vive_se3_at_enable.translation.copy()
+                ),
+                "status": (
+                    "enabled" if getattr(vive_dev, "enabled_teleop", False) else
+                    ("tracking" if state is not None else "waiting")
+                ),
+            }
+            cache = self._vive_panel_cache
+
+        if cache is None:
+            return np.full((height, height, 3), 255, dtype=np.uint8)
+        return cache
+
+    def _vive_pose_panel_loop(self, height):
+        # Headless figure (FigureCanvasAgg -> no window opened), owned by this
+        # thread only.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        dpi = 72
+        size_in = height / dpi
+        fig = Figure(figsize=(size_in, size_in), dpi=dpi)
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, projection="3d")
+
+        while True:
+            start_time = time.time()
+            with self._vive_panel_lock:
+                snapshot = self._vive_panel_snapshot
+            if snapshot is not None:
+                self._render_vive_pose_panel(ax, snapshot)
+                canvas.draw()
+                img_rgb = np.asarray(canvas.buffer_rgba())[:, :, :3]
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                with self._vive_panel_lock:
+                    self._vive_panel_cache = img_bgr
+            time.sleep(max(0.0, self.VIVE_PANEL_REDRAW_INTERVAL - (time.time() - start_time)))
+
+    def _render_vive_pose_panel(self, ax, snapshot):
+        ax.clear()
+        trail = snapshot["trail"]
+        pos = snapshot["pos"]
+        rot = snapshot["rot"]
 
         # Position trail
-        if len(self._vive_pos_trail) > 1:
-            trail = np.array(self._vive_pos_trail)
-            ax.plot(trail[:, 0], trail[:, 1], trail[:, 2], color="gray", lw=0.8, alpha=0.6)
+        if len(trail) > 1:
+            trail_arr = np.array(trail)
+            ax.plot(trail_arr[:, 0], trail_arr[:, 1], trail_arr[:, 2], color="gray", lw=0.8, alpha=0.6)
 
         # Current tracker pose triad (RGB = XYZ)
         if pos is not None:
@@ -765,32 +848,22 @@ class TeleopBase(OperationDataMixin, ABC):
                 ax.quiver(*pos, *rot[:, i] * triad_len, color=color, linewidth=1.5)
 
         # Anchor point when teleop enabled
-        vive_se3_at_enable = getattr(vive_dev, "vive_se3_at_enable", None)
-        if vive_se3_at_enable is not None:
-            ap = vive_se3_at_enable.translation
-            ax.scatter(*ap, color="orange", s=30, zorder=5)
+        if snapshot["anchor"] is not None:
+            ax.scatter(*snapshot["anchor"], color="orange", s=30, zorder=5)
 
         # Auto-scale around trail
-        if self._vive_pos_trail:
-            center = np.mean(self._vive_pos_trail, axis=0)
-            r = max(0.1, np.max(np.abs(np.array(self._vive_pos_trail) - center)) * 1.5)
+        if trail:
+            center = np.mean(trail, axis=0)
+            r = max(0.1, np.max(np.abs(np.array(trail) - center)) * 1.5)
             ax.set_xlim(center[0] - r, center[0] + r)
             ax.set_ylim(center[1] - r, center[1] + r)
             ax.set_zlim(center[2] - r, center[2] + r)
 
-        status = (
-            "enabled" if getattr(vive_dev, "enabled_teleop", False) else
-            ("tracking" if state is not None else "waiting")
-        )
-        ax.set_title(f"Vive ({status})", fontsize=7, pad=2)
+        ax.set_title(f"Vive ({snapshot['status']})", fontsize=7, pad=2)
         ax.set_xlabel("X", fontsize=5)
         ax.set_ylabel("Y", fontsize=5)
         ax.set_zlabel("Z", fontsize=5)
         ax.tick_params(labelsize=4)
-
-        self._vive_canvas.draw()
-        img_rgb = np.asarray(self._vive_canvas.buffer_rgba())[:, :, :3]
-        return cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     def draw_pointcloud(self):
         far_clip_list = (3.0, 3.0, 0.8)  # [m]

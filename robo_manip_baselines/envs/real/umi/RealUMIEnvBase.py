@@ -1,3 +1,4 @@
+import threading
 import time
 from os import path
 
@@ -81,9 +82,18 @@ class RealUMIEnvBase(RealEnvBase):
         pointcloud_camera_color_exposure=None,
         pointcloud_camera_color_gain=None,
         gripper_marker_config=None,
+        record_hz=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+
+        # Recording rate [Hz]. TeleopBase paces its loop to env.dt, and with
+        # no motor to command, nothing else here depends on dt -- so this is
+        # simply the rate at which steps (and thus dataset samples) are
+        # produced. None keeps RealEnvBase's 50 Hz nominal dt (in practice
+        # the loop then just runs as fast as it can, at an irregular rate).
+        if record_hz is not None:
+            self.dt = 1.0 / record_hz
 
         # ArUco gripper-marker width tracking (see
         # common/utils/ArucoGripperUtils.py), following
@@ -148,6 +158,29 @@ class RealUMIEnvBase(RealEnvBase):
                 "width_smoothing_alpha", 0.3
             )
             self._gripper_marker_smoothed_width_m = None
+            # Last successfully estimated percent-closed, held while the
+            # markers are momentarily undetected (occlusion, blur). The
+            # commanded value is a poor fallback on this rig: the gripper is
+            # read from the markers, not driven by the Vive button, so the
+            # command just sits at its initial 0 (= fully open).
+            self._gripper_marker_last_percent_closed = None
+            # Optional (x0, y0, x1, y1) search box -- the finger markers sit
+            # at a fixed image region (the camera is rigidly mounted on the
+            # gripper), and AprilTag corner refinement cost scales with the
+            # searched area. See detect_aruco_tags's roi argument.
+            roi = gripper_marker_config.get("roi")
+            self._gripper_marker_roi = None if roi is None else tuple(roi)
+            # Detect in a background thread (one detection per new camera
+            # frame) instead of inline in _get_obs(): even with the ROI,
+            # AprilTag detection at 1280x800 takes ~70 ms, which otherwise
+            # caps the whole teleop/recording loop at a few Hz. _get_obs()
+            # then just reads the latest estimate (at most one frame stale).
+            self._gripper_marker_async = gripper_marker_config.get(
+                "async_detection", False
+            )
+            self._gripper_marker_lock = threading.Lock()
+            self._gripper_marker_thread = None
+            self._gripper_marker_stop_event = threading.Event()
 
         # Identity free-flyer configuration: (x, y, z, qx, qy, qz, qw).
         init_arm_joint_pos = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
@@ -195,6 +228,18 @@ class RealUMIEnvBase(RealEnvBase):
             pointcloud_camera_color_gain,
         )
 
+        if self._gripper_marker_config is not None and self._gripper_marker_async:
+            self._gripper_marker_thread = threading.Thread(
+                target=self._gripper_marker_detection_loop, daemon=True
+            )
+            self._gripper_marker_thread.start()
+
+    def close(self):
+        if getattr(self, "_gripper_marker_thread", None) is not None:
+            self._gripper_marker_stop_event.set()
+            self._gripper_marker_thread.join(timeout=1.0)
+        super().close()
+
     @property
     def measured_keys_to_save(self):
         return super().measured_keys_to_save + [DataKey.MEASURED_WEIGHT]
@@ -206,6 +251,16 @@ class RealUMIEnvBase(RealEnvBase):
         this without reaching into the "_gripper_marker_config"
         implementation detail directly."""
         return self._gripper_marker_config is not None
+
+    @property
+    def latest_gripper_marker_percent_closed(self):
+        """Most recent marker-based percent-closed estimate, without running a
+        new detection; None if marker tracking is off or nothing has been
+        detected since the last reset."""
+        if self._gripper_marker_config is None:
+            return None
+        with self._gripper_marker_lock:
+            return self._gripper_marker_last_percent_closed
 
     def setup_input_device(self, input_device_name, motion_manager, overwrite_kwargs):
         if input_device_name == "spacemouse":
@@ -238,7 +293,9 @@ class RealUMIEnvBase(RealEnvBase):
         if self._gripper_marker_config is not None:
             # Drop the smoothing filter's state so a new episode doesn't
             # start by holding over a stale width from before the reset.
-            self._gripper_marker_smoothed_width_m = None
+            with self._gripper_marker_lock:
+                self._gripper_marker_smoothed_width_m = None
+                self._gripper_marker_last_percent_closed = None
 
     def _set_action(self, action, duration=None, joint_vel_limit_scale=0.5, wait=False):
         # There is no motor to command and thus no joint-velocity limit to
@@ -247,8 +304,6 @@ class RealUMIEnvBase(RealEnvBase):
         # meant for real revolute-joint velocities, and does not have a
         # physically meaningful interpretation applied directly to a
         # free-flyer's raw (x, y, z, qx, qy, qz, qw) configuration vector.
-        start_time = time.time()
-
         if not np.all(np.isfinite(action)):
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Action contains NaN or Inf: {action}"
@@ -267,28 +322,56 @@ class RealUMIEnvBase(RealEnvBase):
         # spring-loaded trigger design), send gripper_joint_pos to its
         # actuator driver here.
 
-        if wait and duration is not None:
-            elapsed_duration = time.time() - start_time
-            if elapsed_duration < duration:
-                time.sleep(duration - elapsed_duration)
+        # `wait` is deliberately ignored: with no motor there is nothing to
+        # wait for, and sleeping out `duration` here would come on top of
+        # TeleopBase's own pacing of the loop to env.dt (adding a full dt of
+        # dead time to every recorded step).
 
     def _estimate_gripper_percent_closed_from_markers(self):
         """Vision-based measured gripper width, from the two ArUco markers
         mounted on the gripper fingers (see __init__'s gripper_marker_config
-        and common/utils/ArucoGripperUtils.py). Returns None (not 0.0) when
-        unavailable -- no config, camera not yet delivering frames, or
-        markers not currently detected -- so the caller can fall back to
-        echoing the last commanded value instead of reporting a bogus
-        "fully open" reading.
+        and common/utils/ArucoGripperUtils.py). While the markers are
+        momentarily undetected, holds the last valid estimate. Returns None
+        (not 0.0) only when there is no estimate at all yet -- no config, or
+        no frame with detected markers since the last reset -- so the caller
+        can fall back to echoing the last commanded value instead of
+        reporting a bogus "fully open" reading.
         """
         if self._gripper_marker_config is None:
             return None
 
-        config = self._gripper_marker_config
-        frame = self.get_latest_rgb_camera_frame(config["camera_name"])
-        if frame is None:
-            return None
+        if self._gripper_marker_async:
+            with self._gripper_marker_lock:
+                return self._gripper_marker_last_percent_closed
 
+        frame = self.get_latest_rgb_camera_frame(
+            self._gripper_marker_config["camera_name"]
+        )
+        if frame is None:
+            return self._gripper_marker_last_percent_closed
+        with self._gripper_marker_lock:
+            return self._update_gripper_marker_estimate(frame)
+
+    def _gripper_marker_detection_loop(self):
+        """Background worker for async_detection: run one detection per new
+        frame of the marker camera and publish the result for _get_obs()."""
+        camera_name = self._gripper_marker_config["camera_name"]
+        last_frame = None
+        while not self._gripper_marker_stop_event.is_set():
+            frame = self.get_latest_rgb_camera_frame(camera_name)
+            if frame is None or frame is last_frame:
+                time.sleep(0.002)
+                continue
+            last_frame = frame
+            try:
+                tag_dict = self._detect_gripper_markers(frame)
+            except Exception as e:
+                print(f"[{self.__class__.__name__}] Gripper marker detection failed: {e}")
+                continue
+            with self._gripper_marker_lock:
+                self._update_gripper_marker_estimate(frame, tag_dict)
+
+    def _detect_gripper_markers(self, frame):
         if self._gripper_marker_clahe_clip_limit > 0:
             frame = preprocess_low_light_image(
                 frame, clip_limit=self._gripper_marker_clahe_clip_limit
@@ -301,7 +384,18 @@ class RealUMIEnvBase(RealEnvBase):
             self._gripper_marker_camera_matrix,
             dist_coeffs=self._gripper_marker_dist_coeffs,
             corner_refinement=self._gripper_marker_aruco["corner_refinement"],
+            roi=self._gripper_marker_roi,
         )
+        return tag_dict
+
+    def _update_gripper_marker_estimate(self, frame, tag_dict=None):
+        """Turn one frame's marker detections into a filtered percent-closed
+        and remember it. Caller holds _gripper_marker_lock. Returns the last
+        valid estimate (or None if there has never been one) when the
+        markers are not detected in this frame."""
+        if tag_dict is None:
+            tag_dict = self._detect_gripper_markers(frame)
+        config = self._gripper_marker_config
         width_m = get_gripper_width(
             tag_dict,
             left_id=config["left_marker_id"],
@@ -310,7 +404,7 @@ class RealUMIEnvBase(RealEnvBase):
             z_tolerance=config.get("z_tolerance", 0.008),
         )
         if width_m is None:
-            return None
+            return self._gripper_marker_last_percent_closed
 
         # Outlier rejection: a single spurious frame (misdetected corner,
         # ID misread, etc.) can report a width far from reality -- discard
@@ -346,7 +440,10 @@ class RealUMIEnvBase(RealEnvBase):
             * (width_open_m - self._gripper_marker_smoothed_width_m)
             / (width_open_m - width_closed_m)
         )
-        return float(np.clip(percent_closed, 0.0, 100.0))
+        self._gripper_marker_last_percent_closed = float(
+            np.clip(percent_closed, 0.0, 100.0)
+        )
+        return self._gripper_marker_last_percent_closed
 
     def _get_obs(self):
         # Sum across scales (multiple load cells reporting one combined

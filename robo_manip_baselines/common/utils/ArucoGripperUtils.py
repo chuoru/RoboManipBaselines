@@ -16,7 +16,7 @@ depth-outlier-filter + single-marker-mirror fallback) is unchanged from UMI's
 original.
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -107,6 +107,7 @@ def detect_aruco_tags(
     camera_matrix: np.ndarray,
     dist_coeffs: Optional[np.ndarray] = None,
     corner_refinement: Optional[int] = None,
+    roi: Optional[Sequence[int]] = None,
 ) -> Dict[int, dict]:
     """Detect every ArUco/AprilTag marker in `image` with a known size in
     marker_size_map and estimate each one's pose relative to the camera.
@@ -123,6 +124,14 @@ def detect_aruco_tags(
     CORNER_REFINE_APRILTAG for an AprilTag family dictionary, which OpenCV
     recommends over SUBPIX for those markers specifically.
 
+    roi: optional (x0, y0, x1, y1) pixel box to search in (x1/y1 may be
+    None for "to the image edge"). Detection runs on the crop only -- much
+    cheaper with CORNER_REFINE_APRILTAG, whose cost scales with image area
+    (measured on the UMI rig at 1280x800: full frame ~140 ms, rows 450+
+    ~68 ms, identical corners) -- and the detected corners are shifted back
+    to full-image coordinates before pose estimation, so camera_matrix/
+    dist_coeffs stay the full-image ones.
+
     Returns {marker_id: {"rvec": (3,), "tvec": (3,), "corners": (4, 2)}},
     tvec in the same units as marker_size_map's sizes (meters, by
     convention).
@@ -132,6 +141,11 @@ def detect_aruco_tags(
         cv2.aruco.CORNER_REFINE_SUBPIX if corner_refinement is None else corner_refinement
     )
     detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+    x0 = y0 = 0
+    if roi is not None:
+        x0, y0, x1, y1 = roi
+        x0, y0 = int(x0 or 0), int(y0 or 0)
+        image = image[y0:y1, x0:x1]
     corners, ids, _ = detector.detectMarkers(image)
 
     if ids is None or len(ids) == 0:
@@ -176,7 +190,7 @@ def detect_aruco_tags(
         # exact 4-point-square setup, so it is used instead.
         ok, rvec, tvec = cv2.solvePnP(
             object_points,
-            marker_corners.reshape(4, 2),
+            marker_corners.reshape(4, 2).astype(np.float64) + (x0, y0),
             camera_matrix,
             dist_coeffs,
             flags=cv2.SOLVEPNP_ITERATIVE,
@@ -187,7 +201,7 @@ def detect_aruco_tags(
         tag_dict[marker_id] = {
             "rvec": rvec.squeeze(),
             "tvec": tvec.squeeze(),
-            "corners": marker_corners.squeeze(),
+            "corners": marker_corners.reshape(4, 2) + (x0, y0),
         }
 
     return tag_dict

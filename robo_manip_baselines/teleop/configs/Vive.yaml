@@ -3,7 +3,7 @@
 # `python ./teleop/check_vive_devices.py` to find your tracker's serial.
 device_params:
   name: primary
-  serial_number: LHR-208C8961
+  serial_number: LHR-904A2704
 # pos_scale and the rotation matrices below are copied as-is from ViveDual.yaml's
 # left-arm (index 0) calibration, as a starting point only. The dual rig's left/right
 # arms are mounted facing each other, so a single-arm mount will generally have a

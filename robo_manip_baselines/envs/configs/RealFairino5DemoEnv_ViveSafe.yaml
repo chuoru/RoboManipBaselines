@@ -1,0 +1,20 @@
+# First real-hardware trial config for teleop on the real FR5.
+#
+# Same as RealFairino5DemoEnv.yaml, plus extra safety margin for a first
+# real-hardware test with a not-yet-battle-tested input device (Vive
+# tracker): a hard per-command joint motion cap and a lower velocity limit
+# scale, on top of the input device's own reduced pos_scale (see
+# teleop/configs/ViveRealFairino5Safe.yaml). Loosen these once you're
+# confident the motion is well-behaved.
+robot_ip: "192.168.57.2"
+gripper_hand_type: "right"
+gripper_modbus_port: "/dev/ttyUSB0"
+
+# Scales the arm's per-step joint velocity clamp; default is 2.0.
+joint_vel_limit_scale: 0.5
+
+# HARD cap [deg] on how far any joint may move between two consecutive
+# ServoJ commands, enforced after every other limiter/filter -- see
+# RealFairino5EnvBase.max_joint_pos_delta_deg. Disabled (None) by default;
+# enabling it here is the "last line of defense" against a spike command.
+max_joint_pos_delta_deg: 1.0

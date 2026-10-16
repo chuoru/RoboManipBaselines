@@ -217,17 +217,9 @@ class TeleopUmiWithMujocoMirror(OperationRealUMIDemo, TeleopBase):
     def save_data(self):
         import os
 
-        # Recompute the exact same path TeleopBase.save_data() will use, so
-        # the mirror video sits right next to the .rmb it corresponds to.
-        filename = os.path.normpath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "dataset",
-                f"{self.demo_name}_{self.datetime_now:%Y%m%d_%H%M%S}",
-                f"{self.demo_name}_world{self.data_manager.world_idx:0>1}_{self.data_manager.episode_idx:0>3}.{self.args.file_format}",
-            )
-        )
+        # Same path TeleopBase.save_data() will use, so the mirror video sits
+        # right next to the .rmb it corresponds to.
+        filename = self.get_save_filename()
 
         super().save_data()
 

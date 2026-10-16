@@ -161,20 +161,32 @@ class DataManager:
                             f"[{self.__class__.__name__}] Unsupported type of data sequence: {type(all_data_seq[key])}"
                         )
 
+                    # Images are passed as the per-frame list and streamed to
+                    # ffmpeg one frame at a time (see save_rgb_image/
+                    # save_depth_image), never stacked into one big array: the
+                    # stacked copies (plus videoio.uint16save's own several
+                    # full-size intermediates) used to roughly double-to-
+                    # triple peak RAM at save time, which got a 44 s, 1280x800
+                    # RGB+depth UMI episode OOM-killed on a 15 GB machine.
                     if DataKey.is_rgb_image_key(key):
                         video_filename = os.path.join(filename, f"{key}.rmb.mp4")
-                        images = np.array(all_data_seq[key])
                         tasks.append(
                             executor.submit(
-                                self.save_rgb_image, video_filename, images, fps
+                                self.save_rgb_image,
+                                video_filename,
+                                all_data_seq[key],
+                                fps,
                             )
                         )
                     elif DataKey.is_depth_image_key(key):
                         video_filename = os.path.join(filename, f"{key}.rmb.mp4")
-                        images = (1e3 * np.array(all_data_seq[key])).astype(np.uint16)
                         tasks.append(
                             executor.submit(
-                                self.save_depth_image, video_filename, images, fps
+                                self.save_depth_image,
+                                video_filename,
+                                all_data_seq[key],
+                                fps,
+                                1e3,
                             )
                         )
                     else:
@@ -209,11 +221,29 @@ class DataManager:
 
     @staticmethod
     def save_rgb_image(video_filename, images, fps=None):
-        videoio.videosave(video_filename, images, fps=fps)
+        """Encode a sequence of HxWx3 uint8 frames, streaming frame by frame."""
+        if len(images) == 0:
+            return
+        height, width = np.asarray(images[0]).shape[:2]
+        with videoio.VideoWriter(video_filename, (width, height), fps=fps) as writer:
+            for image in images:
+                writer.write(np.asarray(image))
 
     @staticmethod
-    def save_depth_image(video_filename, images, fps=None):
-        videoio.uint16save(video_filename, images, fps=fps)
+    def save_depth_image(video_filename, images, fps=None, scale=1.0):
+        """Encode a sequence of HxW depth frames as lossless uint16 video
+        (same format as videoio.uint16save), streaming frame by frame.
+        Each frame is multiplied by `scale` (e.g. 1e3 for [m] -> [mm]) and
+        cast to uint16 just before it is written."""
+        if len(images) == 0:
+            return
+        height, width = np.asarray(images[0]).shape[:2]
+        with videoio.Uint16Writer(video_filename, (width, height), fps=fps) as writer:
+            for image in images:
+                image = np.asarray(image)
+                if scale != 1.0 or image.dtype != np.uint16:
+                    image = (scale * image).astype(np.uint16)
+                writer.write(image)
 
     def load_data(self, filename, load_keys=None, skip_image=False):
         """Load data."""

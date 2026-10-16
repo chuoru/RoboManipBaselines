@@ -1,4 +1,5 @@
 import threading
+import time
 import unittest
 
 import gymnasium as gym
@@ -112,6 +113,60 @@ class TestGripperMarkerSmoothing(unittest.TestCase):
         # Real, gradual motion to fully open must actually be reflected
         # (allowing for smoothing lag -- not asserting it reaches exactly 0%).
         self.assertLess(pct, 20.0)
+
+    def test_holds_last_value_when_markers_lost(self):
+        for _ in range(5):
+            self._set_frame(0.045)
+            steady_pct = self._read_percent_closed()
+
+        # Markers out of view for a frame: must hold the last estimate, not
+        # fall back to the (never-driven) commanded value of 0% (= open).
+        self.unwrapped.rgb_cameras["hand"]["latest_frame"] = np.full(
+            (960, 960, 3), 255, dtype=np.uint8
+        )
+        self.assertAlmostEqual(self._read_percent_closed(), steady_pct, delta=0.1)
+
+
+class TestGripperMarkerAsyncDetection(unittest.TestCase):
+    """async_detection runs the marker detection in a background thread;
+    _get_obs() must then just report the latest estimate."""
+
+    def setUp(self):
+        self.env = gym.make(
+            "robo_manip_baselines/RealUMIDemoEnv-v0",
+            gripper_marker_config=make_gripper_marker_config(
+                async_detection=True, roi=[0, 0, None, None]
+            ),
+        )
+        self.unwrapped = self.env.unwrapped
+        self.helper = TestGripperMarkerSmoothing()
+        self.helper.aruco_dict = get_aruco_dict("DICT_4X4_50")
+        self.helper.camera_matrix = np.array(CAMERA_MATRIX, dtype=np.float64)
+        self.helper.unwrapped = self.unwrapped
+
+    def tearDown(self):
+        self.unwrapped.rgb_cameras = {}
+        self.env.close()
+        self.assertFalse(self.unwrapped._gripper_marker_thread.is_alive())
+
+    def _wait_for_estimate(self, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            value = self.unwrapped.latest_gripper_marker_percent_closed
+            if value is not None:
+                return value
+            time.sleep(0.01)
+        return None
+
+    def test_background_estimate_is_reported(self):
+        self.assertIsNone(self.unwrapped.latest_gripper_marker_percent_closed)
+        self.helper._set_frame(0.045)
+        value = self._wait_for_estimate()
+        self.assertIsNotNone(value)
+        self.assertAlmostEqual(value, 50.0, delta=2.0)
+        self.assertAlmostEqual(
+            self.unwrapped._get_obs()["joint_pos"][7], value, delta=1e-9
+        )
 
 
 if __name__ == "__main__":

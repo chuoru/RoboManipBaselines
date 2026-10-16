@@ -96,6 +96,38 @@ class TestArucoGripperUtils(unittest.TestCase):
                 self.assertIsNotNone(width)
                 self.assertLess(abs(width - true_width), 0.003)
 
+    def test_roi_matches_full_image(self):
+        # Markers placed in the lower part of the image; searching only that
+        # region must give the same full-image corners/pose as searching the
+        # whole frame, and a region that excludes them must find nothing.
+        img = np.full((480, 640, 3), 255, dtype=np.uint8)
+        for marker_id, x in ((0, -0.03), (1, 0.03)):
+            render_marker(
+                img, self.aruco_dict, marker_id, self.marker_size,
+                (x, 0.02, self.nominal_z), self.camera_matrix,
+            )
+        full = detect_aruco_tags(
+            img, self.aruco_dict, self.marker_size_map, self.camera_matrix
+        )
+        cropped = detect_aruco_tags(
+            img, self.aruco_dict, self.marker_size_map, self.camera_matrix,
+            roi=(0, 240, None, None),
+        )
+        self.assertEqual(sorted(full), [0, 1])
+        self.assertEqual(sorted(cropped), [0, 1])
+        for marker_id in (0, 1):
+            np.testing.assert_allclose(
+                cropped[marker_id]["corners"], full[marker_id]["corners"], atol=0.05
+            )
+            np.testing.assert_allclose(
+                cropped[marker_id]["tvec"], full[marker_id]["tvec"], atol=1e-4
+            )
+        excluded = detect_aruco_tags(
+            img, self.aruco_dict, self.marker_size_map, self.camera_matrix,
+            roi=(0, 0, None, 200),
+        )
+        self.assertEqual(excluded, {})
+
     def test_single_marker_fallback(self):
         # Only the left marker rendered -- get_gripper_width should double
         # its absolute offset from the optical axis as the width estimate.

@@ -59,8 +59,17 @@ pointcloud_camera_color_resolution: [1280, 800, 10]
 # lower gain if noise/darkness looks like the bigger problem in your own
 # snapshots) rather than assuming these exact numbers are already optimal
 # for your specific lighting.
-pointcloud_camera_color_exposure: 80
-pointcloud_camera_color_gain: 80
+#
+# 2026-10-16, re-tuned for the room with the lights ON: 80/80 (tuned for a
+# dim room) left 74% of pixels saturated (>=250), dropped tag detection to
+# 19/24 and inflated the measured gripper width (0.188 m vs ~0.172 m at a
+# sane exposure). Sweep at 1280x800 (mean gray / saturated px / tags):
+#   80/80 238/74%/19-of-24   80/16 175/1.7%/24   40/16 129/0%/24
+#   20/40 142/0%/24          20/16  87/0%/24
+# 20/40 = half the previous exposure time (less motion blur) with no
+# clipping. If the lights are off again, go back up along the same curve.
+pointcloud_camera_color_exposure: 20
+pointcloud_camera_color_gain: 40
 
 # Insta360 hand camera (the intended eventual replacement for the Gemini
 # above, and for the Vive Tracker below -- see insta360_bridge/README.md).
@@ -75,6 +84,21 @@ pointcloud_camera_color_gain: 80
 # socket path to test the plumbing without real hardware).
 # insta360_ids:
 #   hand: "/tmp/insta360_hand.sock"
+
+# Recording rate [Hz] -- the teleop loop (and thus every saved sample) is
+# paced to this. Measured 2026-10-14 on this PC: the loop sustains ~25 Hz
+# without the MuJoCo mirror (--no_mirror) and ~11-15 Hz with it. Higher
+# rates mean proportionally more RAM while recording: every frame
+# (1280x800 RGB + float32 depth, ~7 MB) is held in memory until the episode
+# is saved, and saving briefly needs about twice that (~16 MB/frame peak,
+# i.e. ~7 GB for a 30 s episode at 15 Hz on this 15 GB machine).
+record_hz: 15
+
+# Where recorded episodes are saved (default without this key: the repo's
+# robo_manip_baselines/dataset/). /mnt/data is a separate 477 GB disk
+# (mounted from /etc/fstab); the root filesystem only had ~13 GB free, i.e.
+# ~40 min of recording at ~5 MB/s.
+dataset_dir: /mnt/data/RoboManipBaselines_dataset
 
 # Note: unlike the robot envs, there is no robot_ip/gripper_modbus_port here
 # -- this rig has no attached robot arm or motorized gripper. Pose tracking
@@ -94,8 +118,10 @@ pointcloud_camera_color_gain: 80
 # number, stable across replugs/reboots -- unlike /dev/ttyACM<N>'s
 # enumeration index, which can shift). Find it with:
 #   ls /dev/serial/by-id/
-m5stack_ids:
-  scale: "D0:CF:13:0C:B4:D4"
+# Disabled: the scale is not used on this rig for now (with it listed but
+# unplugged, setup_m5stack_scale raises at startup). Uncomment to re-enable.
+# m5stack_ids:
+#   scale: "D0:CF:13:0C:B4:D4"
 
 # ArUco gripper-marker width tracking (see
 # common/utils/ArucoGripperUtils.py, RealUMIEnvBase._get_obs()), following
@@ -192,9 +218,12 @@ gripper_marker_config:
   # disable entirely if testing shows it is not worth it for your lighting.
   # See preprocess_low_light_image's docstring.
   clahe_clip_limit: 3.0
-  # Measured from a live 15s open/close capture (see above) -- the observed
-  # min/max, NOT independently confirmed to be the true physical extremes.
-  width_open_m: 0.185
+  # Re-measured 2026-10-14 with the gripper at rest (spring-loaded fully
+  # open, UMI's default state): raw width 0.1770-0.1779 m (mean 0.1774 m,
+  # 50/50 frames, both tags detected). The earlier 0.185 m (max of a 15s
+  # open/close capture) made the at-rest gripper read ~13% closed instead
+  # of 0%.
+  width_open_m: 0.174
   # Re-calibrated: with the original 0.104 m, MirrorUmiGripperToFairino5.py's
   # dry_run test never read above ~70% closed even when the rig was closed
   # by hand as far as it goes, meaning the true fully-closed width is larger
@@ -204,7 +233,7 @@ gripper_marker_config:
   # min/max width_m while you open/close the rig by hand) to get an exact
   # measurement and replace this if 100%/0% still don't line up with true
   # fully-closed/open.
-  width_closed_m: 0.128
+  width_closed_m: 0.129
   # Outlier rejection + smoothing (see RealUMIEnvBase.__init__'s comment for
   # the full reasoning): added after live testing showed the displayed
   # percent-closed occasionally snapping to 0%/100% under changing light --
@@ -229,3 +258,12 @@ gripper_marker_config:
   # trades responsiveness for noise, not outlier rejection).
   max_width_jump_m: 0.06
   width_smoothing_alpha: 0.6
+  # Search only the lower part of the 1280x800 frame, where the finger tags
+  # sit (tag centers at y~570 px; the camera is rigidly mounted on the
+  # gripper, so this region does not move with the rig). Cuts AprilTag
+  # detection from ~140 ms to ~68 ms with identical corners. Widen if the
+  # tags are ever re-mounted elsewhere.
+  roi: [0, 450, null, null]
+  # Run detection in a background thread (one per camera frame) so it no
+  # longer blocks the teleop/recording loop -- see RealUMIEnvBase.__init__.
+  async_detection: true

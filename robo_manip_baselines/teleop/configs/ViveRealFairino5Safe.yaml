@@ -1,0 +1,20 @@
+# First real-hardware trial config for Vive teleop on the real FR5.
+#
+# Same tracker/rotation calibration as Vive.yaml (direction confirmed correct
+# in the MuJoCo sim), but with pos_scale cut to a third and gripper_scale
+# halved, so the arm/gripper move much more conservatively per tracker motion
+# during the first real-hardware test. Once confident, switch back to
+# Vive.yaml (pos_scale 0.9) or dial this up gradually.
+device_params:
+  name: primary
+  serial_number: LHR-904A2704
+pos_scale: 0.3
+gripper_scale: 2.5
+vive_to_eef_frame_rotation:
+  - [-0.994961, 0.025321, 0.097010]
+  - [0.098177, 0.049841, 0.993920]
+  - [0.020332, 0.998436, -0.052076]
+vive_world_to_base_frame_rotation:
+  - [-0.252292, -0.966132, -0.054211]
+  - [0.965930, -0.248107, -0.073632]
+  - [0.057688, -0.070940, 0.995811]
