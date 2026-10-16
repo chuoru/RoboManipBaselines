@@ -622,19 +622,15 @@ class TrainBase(ABC):
         if len(train_history) == 0 and len(val_history) == 0:
             return
 
+        # loss_history entries are (epoch, loss) tuples, as appended in the
+        # per-epoch summary (see update_loss_plot()).
         fig, ax = plt.subplots()
         if len(train_history) > 0:
-            ax.plot(
-                [s["epoch"] for s in train_history],
-                [s["loss"] for s in train_history],
-                label="train",
-            )
+            epochs, losses = zip(*train_history)
+            ax.plot(epochs, losses, label="train")
         if len(val_history) > 0:
-            ax.plot(
-                [s["epoch"] for s in val_history],
-                [s["loss"] for s in val_history],
-                label="val",
-            )
+            epochs, losses = zip(*val_history)
+            ax.plot(epochs, losses, label="val")
         ax.set_xlabel("epoch")
         ax.set_ylabel("loss")
         ax.set_yscale("log")
@@ -651,10 +647,10 @@ class TrainBase(ABC):
         # Also dump the raw per-epoch losses so the curve can be re-plotted
         # or analyzed later without re-parsing tensorboard logs
         loss_by_epoch = {}
-        for s in train_history:
-            loss_by_epoch.setdefault(s["epoch"], {})["train_loss"] = s["loss"]
-        for s in val_history:
-            loss_by_epoch.setdefault(s["epoch"], {})["val_loss"] = s["loss"]
+        for epoch, loss in train_history:
+            loss_by_epoch.setdefault(epoch, {})["train_loss"] = loss
+        for epoch, loss in val_history:
+            loss_by_epoch.setdefault(epoch, {})["val_loss"] = loss
 
         loss_csv_path = os.path.join(self.args.checkpoint_dir, "loss_history.csv")
         with open(loss_csv_path, "w", newline="") as f:

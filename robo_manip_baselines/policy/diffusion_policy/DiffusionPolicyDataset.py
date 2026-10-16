@@ -67,11 +67,18 @@ class DiffusionPolicyDataset(DatasetBase, DpStyleDatasetMixin):
             if len(self.model_meta_info["image"]["camera_names"]) == 0:
                 images = None
             else:
+                # Decode only the window this sample needs. Indexing the
+                # video with [::skip] first decoded (and, with
+                # enable_rmb_cache, cached) the WHOLE episode per sample, which
+                # at 1280x800 OOM-killed a 4-worker run on a 15 GB machine.
+                # time_idxes is a clipped arange, so it is non-decreasing.
+                window_start = int(time_idxes[0])
+                window_end = int(time_idxes[-1])
                 images = np.stack(
                     [
-                        rmb_data[DataKey.get_rgb_image_key(camera_name)][::skip][
-                            time_idxes
-                        ]
+                        rmb_data[DataKey.get_rgb_image_key(camera_name)][
+                            window_start * skip : window_end * skip + 1 : skip
+                        ][time_idxes - window_start]
                         for camera_name in self.model_meta_info["image"]["camera_names"]
                     ],
                     axis=0,

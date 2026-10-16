@@ -60,6 +60,22 @@ class RmbData:
         # single time -- worth ~20% in practice, measured by re-reading 200
         # random 16-frame windows from the same file with vs. without reuse.
         _decoder_cache = {}
+        # PID that owns _decoder_cache. A torchcodec decoder holds an open file
+        # whose read offset is shared with every process forked after it was
+        # created, so DataLoader workers inheriting the parent's decoders
+        # (created when the trainer reads an example image) all seek/read the
+        # same file descriptor concurrently and get corrupted packets
+        # ("Could not push packet to decoder: Invalid data found when
+        # processing input"). Drop inherited decoders in each new process.
+        _decoder_cache_pid = None
+
+        @classmethod
+        def _get_decoder_cache(cls):
+            pid = os.getpid()
+            if RmbData.RmbVideo._decoder_cache_pid != pid:
+                RmbData.RmbVideo._decoder_cache = {}
+                RmbData.RmbVideo._decoder_cache_pid = pid
+            return RmbData.RmbVideo._decoder_cache
 
         def __init__(self, path, enable_cache=False, image_size=None):
             self.path = path
@@ -100,25 +116,24 @@ class RmbData:
             # torchcodec's VideoDecoder is slightly faster, so prefer it and
             # fall back to videoio when it could not be imported (see the
             # import guard at the top of this module).
+            decoder_cache = self._get_decoder_cache()
             if _TORCHCODEC_AVAILABLE:
-                if self.path not in RmbData.RmbVideo._decoder_cache:
-                    RmbData.RmbVideo._decoder_cache[self.path] = (
-                        torchcodec.decoders.VideoDecoder(
-                            self.path, dimension_order="NHWC"
-                        )
+                if self.path not in decoder_cache:
+                    decoder_cache[self.path] = torchcodec.decoders.VideoDecoder(
+                        self.path, dimension_order="NHWC"
                     )
-                decoder = RmbData.RmbVideo._decoder_cache[self.path]
+                decoder = decoder_cache[self.path]
                 data = decoder[idx].numpy()
             else:
                 # videoio has no seek/random-access API, so the whole clip is
                 # decoded and indexed. Cache the decoded array rather than
                 # re-decoding per access -- without it this is far slower than
                 # torchcodec, not just "slightly".
-                if self.path not in RmbData.RmbVideo._decoder_cache:
-                    RmbData.RmbVideo._decoder_cache[self.path] = np.asarray(
+                if self.path not in decoder_cache:
+                    decoder_cache[self.path] = np.asarray(
                         list(videoio.videoread(self.path))
                     )
-                data = RmbData.RmbVideo._decoder_cache[self.path][idx]
+                data = decoder_cache[self.path][idx]
             if self.image_size is not None:
                 if data.ndim == 3:  # (H, W, C)
                     data = cv2.resize(
