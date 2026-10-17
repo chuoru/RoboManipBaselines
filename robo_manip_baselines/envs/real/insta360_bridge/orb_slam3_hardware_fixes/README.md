@@ -50,6 +50,19 @@ contents will differ). Re-verification against real hardware is required
 after porting; this sandbox has no camera attached to reproduce any of these
 crashes directly.
 
+**`cheng-chi_ORB_SLAM3_master.patch`** is the actually-current one to apply:
+the full, cumulative `git diff` of everything done to `third_party/ORB_SLAM3`
+since the fork swap (the porting below, the two new bugs found in Porting
+status, and the `-march=native` strip) -- same situation as above, this
+lives only as uncommitted working-tree changes in the submodule (not
+pushable to `cheng-chi/ORB_SLAM3`'s own remote), so after a fresh
+`git submodule update --init` on `third_party/ORB_SLAM3`, re-apply it with
+`git apply <path-to-this-file>` from that submodule's root before building,
+or this exact state is lost. Keep this patch regenerated
+(`git diff > .../cheng-chi_ORB_SLAM3_master.patch` from inside the
+submodule, excluding build artifacts) whenever the submodule's working tree
+changes again.
+
 ## Porting status (as of the fork swap)
 
 All of the above was re-applied directly to `third_party/ORB_SLAM3` (now
@@ -96,9 +109,42 @@ that build:
   `Examples/Monocular-Inertial/` and registered in `CMakeLists.txt`
   unchanged (no API differences hit) and builds clean.
 - Both `libORB_SLAM3.so` and the live `insta360_bridge` executable rebuild
-  cleanly against this fork in this environment. **None of this has been
-  tested against real hardware** (this sandbox has no Insta360 camera
-  attached) — do that before trusting it over the previous build.
+  cleanly against this fork in this environment. **Tested against real
+  recorded data** (see below) but **not yet against a live camera** (this
+  sandbox has no Insta360 attached) — do that before trusting the live
+  bridge over the previous build.
+- **Two real crashes found by actually running `mono_inertial_video` against
+  real pre-existing recordings** (`robo_manip_baselines/dataset/insta360x3/`
+  -- `.insv`/`.mp4` on-device recordings and a `bridge_apriltag_test.avi`
+  bridge `--record` session), confirmed via gdb:
+  1. `mono_inertial_video.cc`'s circular safety mask was gated on
+     `imageScale != 1.f`, which does NOT reliably distinguish "already
+     masked by the bridge" from "genuine unmasked native recording" -- it
+     happened to be 1 in both cases once `Insta360X3_2880.yaml`'s
+     `Camera.width/height` (2880) was set to match the native recording's
+     own resolution exactly. Unmasked fisheye-circle-exterior pixels then
+     reached `TrackMonocular`, causing a reproducible SIGSEGV in
+     `ORB_SLAM3::Tracking::CreateInitialMapMonocular`. Fixed by deciding
+     whether to mask from the frame's own native resolution
+     (`frame.cols > 1000`) instead, computed before any resize.
+  2. `System::SaveKeyFrameTrajectoryEuRoC(const string&)` (plain, filename-
+     only overload) had the exact same uninitialized-`pBiggerMap` bug as
+     the other `Save*` functions already fixed above -- missed earlier
+     because its loop body has no diagnostic `cout` lines, so the
+     blanket text-replace used for the other three never matched it.
+     Confirmed via gdb: SIGSEGV (`pthread_mutex_lock` on a wild pointer)
+     inside `Map::GetAllKeyFrames()` when every map in the atlas had 0
+     keyframes (i.e. monocular-inertial bootstrap never succeeded for that
+     clip) -- the `if(!pBiggerMap)` guard there was always present but
+     checking garbage stack memory, not a reliable null.
+  Both existing test clips are short (~22-25s) and never achieve a
+  sustained map after these fixes -- clean exit, no crash, just
+  `Map 0 has 0 KFs` -- plausibly a real motion/duration limitation of
+  those specific clips (monocular bootstrap needs enough parallax/motion
+  diversity) rather than a remaining bug, consistent with
+  `feat/insta360-docker-slam-fixes`'s own real-hardware finding that
+  sustained tracking needs tens of seconds of real motion. Not yet tried
+  against a longer/better-motion clip.
 - **`-march=native` ABI mismatch, found via `feat/insta360-docker-slam-fixes`
   (merged into this branch)**: ORB_SLAM3/DBoW2/g2o's CMakeLists.txt all add
   `-march=native` in Release by default, which that branch found (on real

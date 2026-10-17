@@ -1,0 +1,1031 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3237cb4..dfb24f0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -9,8 +9,8 @@ MESSAGE("Build type: " ${CMAKE_BUILD_TYPE})
+ 
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall   -O3")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
+-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -march=native")
+-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
++set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
++set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+ 
+ # Check C++11 or C++0x support
+ include(CheckCXXCompilerFlag)
+@@ -141,3 +141,10 @@ target_link_libraries(mono_inertial_gopro_localize ${PROJECT_NAME})
+ add_executable(gopro_slam
+ Examples/Monocular-Inertial/gopro_slam.cc)
+ target_link_libraries(gopro_slam ${PROJECT_NAME})
++
++# Offline driver for RoboManipBaselines' Insta360 bridge recordings (raw
++# video + native long-format IMU CSV) -- see
++# robo_manip_baselines/envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++add_executable(mono_inertial_video
++Examples/Monocular-Inertial/mono_inertial_video.cc)
++target_link_libraries(mono_inertial_video ${PROJECT_NAME})
+diff --git a/Examples/Monocular-Inertial/gopro_slam.cc b/Examples/Monocular-Inertial/gopro_slam.cc
+index f9a0f76..d05f073 100644
+--- a/Examples/Monocular-Inertial/gopro_slam.cc
++++ b/Examples/Monocular-Inertial/gopro_slam.cc
+@@ -183,7 +183,9 @@ int main(int argc, char **argv) {
+   }
+ 
+   // Create SLAM system. It initializes all system threads and gets ready to process frames.
+-  cv::Ptr<cv::aruco::Dictionary> aruco_dict = cv::aruco::getPredefinedDictionary(aruco_dict_id);
++  // OpenCV >= 4.7 changed getPredefinedDictionary() to return
++  // cv::aruco::Dictionary by value instead of cv::Ptr<Dictionary>.
++  cv::Ptr<cv::aruco::Dictionary> aruco_dict = cv::makePtr<cv::aruco::Dictionary>(cv::aruco::getPredefinedDictionary(aruco_dict_id));
+   ORB_SLAM3::System SLAM(
+     vocabulary, setting, 
+     ORB_SLAM3::System::IMU_MONOCULAR, 
+diff --git a/Examples/Monocular-Inertial/mono_inertial_video.cc b/Examples/Monocular-Inertial/mono_inertial_video.cc
+new file mode 100644
+index 0000000..4b45e03
+--- /dev/null
++++ b/Examples/Monocular-Inertial/mono_inertial_video.cc
+@@ -0,0 +1,245 @@
++/**
++* Offline Monocular-Inertial driver for a raw video file + a long-format IMU
++* CSV (as produced by robo_manip_baselines/misc/ConvertInsvToMp4AndImu.py
++* from Insta360 .insv recordings), instead of ORB-SLAM3's usual pre-extracted
++* image-sequence datasets (EuRoC/TUM-VI style).
++*/
++
++#include<cstdlib>
++#include<iostream>
++#include<fstream>
++#include<sstream>
++#include<vector>
++
++#include<opencv2/opencv.hpp>
++
++#include<System.h>
++#include "ImuTypes.h"
++
++using namespace std;
++
++// Loads a long-format IMU CSV with header "timestamp_ms,sensor_type,x,y,z"
++// where every pair of adjacent data rows shares the same timestamp_ms in
++// the fixed order (gyro, accel). Fails loudly if that invariant doesn't
++// hold, rather than silently mispairing gyro/accel.
++void LoadIMUCsv(const string &strImuCsvPath, vector<double> &vTimeStamps,
++                 vector<cv::Point3f> &vAcc, vector<cv::Point3f> &vGyro)
++{
++    ifstream fImu(strImuCsvPath.c_str());
++    if(!fImu.is_open())
++    {
++        cerr << "Failed to open IMU csv: " << strImuCsvPath << endl;
++        exit(1);
++    }
++
++    string header;
++    getline(fImu, header);
++
++    vTimeStamps.reserve(50000);
++    vAcc.reserve(50000);
++    vGyro.reserve(50000);
++
++    while(!fImu.eof())
++    {
++        string lineGyro, lineAccel;
++        if(!getline(fImu, lineGyro) || lineGyro.empty())
++            break;
++        if(!getline(fImu, lineAccel) || lineAccel.empty())
++        {
++            cerr << "IMU csv ended with an unpaired row: " << lineGyro << endl;
++            exit(1);
++        }
++
++        stringstream ssGyro(lineGyro), ssAccel(lineAccel);
++        string tsGyroStr, typeGyro, gx, gy, gz;
++        string tsAccelStr, typeAccel, ax, ay, az;
++
++        getline(ssGyro, tsGyroStr, ',');
++        getline(ssGyro, typeGyro, ',');
++        getline(ssGyro, gx, ',');
++        getline(ssGyro, gy, ',');
++        getline(ssGyro, gz, ',');
++
++        getline(ssAccel, tsAccelStr, ',');
++        getline(ssAccel, typeAccel, ',');
++        getline(ssAccel, ax, ',');
++        getline(ssAccel, ay, ',');
++        getline(ssAccel, az, ',');
++
++        if(typeGyro != "gyro" || typeAccel != "accel" || tsGyroStr != tsAccelStr)
++        {
++            cerr << "Unexpected IMU csv row order/pairing at timestamp "
++                 << tsGyroStr << " (" << typeGyro << ") / "
++                 << tsAccelStr << " (" << typeAccel << "). "
++                 << "Expected an adjacent (gyro, accel) pair sharing the same timestamp_ms."
++                 << endl;
++            exit(1);
++        }
++
++        double t_sec = stod(tsGyroStr) / 1000.0;
++        vTimeStamps.push_back(t_sec);
++        vGyro.push_back(cv::Point3f(stof(gx), stof(gy), stof(gz)));
++        vAcc.push_back(cv::Point3f(stof(ax), stof(ay), stof(az)));
++    }
++}
++
++int main(int argc, char **argv)
++{
++    if(argc != 6 && argc != 7)
++    {
++        cerr << endl << "Usage: ./mono_inertial_video path_to_vocabulary path_to_settings "
++                         "path_to_video.mp4 path_to_imu.csv path_to_trajectory_output_basename "
++                         "[--viewer]" << endl;
++        return 1;
++    }
++
++    const string strVoc = argv[1];
++    const string strSettings = argv[2];
++    const string strVideo = argv[3];
++    const string strImuCsv = argv[4];
++    const string strOutBase = argv[5];
++    const bool bUseViewer = (argc == 7) && (string(argv[6]) == "--viewer");
++
++    vector<double> vTimestampsImu;
++    vector<cv::Point3f> vAcc, vGyro;
++    cout << "Loading IMU csv..." << endl;
++    LoadIMUCsv(strImuCsv, vTimestampsImu, vAcc, vGyro);
++    cout << "LOADED! " << vTimestampsImu.size() << " IMU samples." << endl;
++
++    cv::VideoCapture cap(strVideo);
++    if(!cap.isOpened())
++    {
++        cerr << "Failed to open video: " << strVideo << endl;
++        return 1;
++    }
++    const double fps = cap.get(cv::CAP_PROP_FPS);
++    const int nFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
++    cout << "Video: " << nFrames << " frames at " << fps << " fps." << endl;
++
++    // TEMPORARY (debugging why the map never initializes -- 0 KFs): bump
++    // from the library's default VERBOSITY_NORMAL so Tracking's internal
++    // PrintMess calls (initialization attempts/failures, feature counts,
++    // etc.) actually print instead of being filtered out.
++    ORB_SLAM3::Verbose::SetTh(ORB_SLAM3::Verbose::VERBOSITY_DEBUG);
++
++    // Create SLAM system. It initializes all system threads and gets ready to process frames.
++    // bUseViewer=false (default, no --viewer arg): skips creating the
++    // Pangolin window entirely (see System::System in src/System.cc), so
++    // this runs fully headless.
++    ORB_SLAM3::System SLAM(strVoc, strSettings, ORB_SLAM3::System::IMU_MONOCULAR, bUseViewer);
++    const float imageScale = SLAM.GetImageScale();
++
++    // Circular safety mask blacking out pixels beyond the calibration's
++    // valid angular range -- see Insta360X3_2880.yaml's Camera1.k1-k4
++    // comment: that fit (rescaled from the live-stream calibration) is
++    // only monotonic (physically valid) up to ~44 degrees incidence.
++    // Feeding ORB_SLAM3 pixels past that segfaulted it (libORB_SLAM3.so)
++    // in envs/real/insta360_bridge's live pipeline; same fix applied here.
++    // Native-resolution center/radius (2880x2880, r=1125px), scaled by
++    // imageScale to match whatever resolution actually reaches
++    // TrackMonocular below.
++    const cv::Point kMaskCenterNative(1441, 1441);
++    const int kMaskRadiusNative = 1125;
++    cv::Mat safe_mask;
++
++    size_t firstImu = 0;
++    cv::Mat frame;
++    for(int ni = 0; ni < nFrames; ni++)
++    {
++        if(!cap.read(frame))
++            break;
++
++        const double tframe = ni / fps;
++
++        vector<ORB_SLAM3::IMU::Point> vImuMeas;
++        while(firstImu < vTimestampsImu.size() && vTimestampsImu[firstImu] <= tframe)
++        {
++            vImuMeas.push_back(ORB_SLAM3::IMU::Point(
++                vAcc[firstImu].x, vAcc[firstImu].y, vAcc[firstImu].z,
++                vGyro[firstImu].x, vGyro[firstImu].y, vGyro[firstImu].z,
++                vTimestampsImu[firstImu]));
++            firstImu++;
++        }
++
++        // Decide whether to mask BEFORE any resize, from the frame's own
++        // native resolution -- NOT imageScale (see below for why that was
++        // wrong). envs/real/insta360_bridge's own --record output is
++        // already cropped+masked+resized server-side to a small target
++        // resolution (640/800px); a genuine native on-device recording
++        // (this driver's actual intended input, paired with
++        // Insta360X3_2880.yaml) is always far larger (1920/2880/3840px).
++        // 1000px is a safe threshold between the two.
++        const bool is_native_unmasked_frame = frame.cols > 1000;
++
++        if(imageScale != 1.f)
++            cv::resize(frame, frame, cv::Size(), imageScale, imageScale);
++
++        // kMaskCenterNative/kMaskRadiusNative above are calibrated for the
++        // *native* 2880x2880 on-device recording this mask was originally
++        // written for. Scaled by frame.cols/2880 (the frame's ACTUAL size
++        // relative to that calibration), not by imageScale -- confirmed via
++        // a real segfault (gdb: SIGSEGV in
++        // ORB_SLAM3::Tracking::CreateInitialMapMonocular, from feeding
++        // keypoints detected in the unmasked fisheye-circle-exterior
++        // corners) that imageScale==1 does NOT reliably mean "already
++        // masked": it is also 1 whenever Insta360X3_2880.yaml's
++        // Camera.width/height happens to equal the native recording's own
++        // resolution (e.g. both 2880), which is a genuinely unmasked native
++        // frame despite imageScale reading 1. Conversely, applying this
++        // native-2880 mask on top of an already-640x640 pre-masked bridge
++        // frame puts its center (1441,1441) entirely outside the frame
++        // (nearest corner ~1134px away, less than the 1125px radius), so
++        // the "circle" never overlaps the visible canvas and every frame
++        // comes out pure black -- confirmed this silently produced zero ORB
++        // keypoints on every frame (0 KFs, no map ever initialized) when
++        // this mask was previously (wrongly) applied unconditionally to
++        // pre-masked bridge recordings too. is_native_unmasked_frame (set
++        // above, before the resize) disambiguates both cases correctly.
++        cv::Mat masked_frame;
++        if(is_native_unmasked_frame)
++        {
++            if(safe_mask.empty())
++            {
++                const float native_scale = static_cast<float>(frame.cols) / 2880.f;
++                safe_mask = cv::Mat::zeros(frame.rows, frame.cols, CV_8UC1);
++                cv::circle(safe_mask,
++                           cv::Point(kMaskCenterNative.x * native_scale, kMaskCenterNative.y * native_scale),
++                           static_cast<int>(kMaskRadiusNative * native_scale), cv::Scalar(255), -1);
++            }
++            masked_frame = cv::Mat::zeros(frame.size(), frame.type());
++            frame.copyTo(masked_frame, safe_mask);
++        }
++        else
++        {
++            masked_frame = frame;
++        }
++
++        SLAM.TrackMonocular(masked_frame, tframe, vImuMeas);
++    }
++
++    // Save trajectories BEFORE Shutdown() (reordered from the stock
++    // examples' Shutdown()-then-save order): with --viewer, System::
++    // Shutdown() (src/System.cc) never synchronizes with the still-running
++    // Pangolin viewer thread (a known upstream ORB_SLAM3 issue -- its
++    // mpViewer->RequestFinish()/isFinished() wait is commented out), which
++    // segfaulted envs/real/insta360_bridge on exit; saving first means
++    // that's avoided below by skipping Shutdown() entirely rather than
++    // losing the trajectory output too.
++    //
++    // SaveTrajectoryTUM is not usable here: it explicitly rejects monocular
++    // sensors (see src/System.cc), so use the EuRoC-style trajectory savers
++    // instead, same as the stock mono_inertial_tum_vi/mono_inertial_euroc examples.
++    SLAM.SaveTrajectoryEuRoC(strOutBase + "_CameraTrajectory.txt");
++    SLAM.SaveKeyFrameTrajectoryEuRoC(strOutBase + "_KeyFrameTrajectory.txt");
++
++    if(bUseViewer)
++    {
++        // _Exit() skips the C++ destructor chain (and thus Shutdown()'s
++        // risky viewer-thread wait) entirely -- acceptable since --viewer
++        // is an interactive/debug aid here, not a headless batch run.
++        std::_Exit(0);
++    }
++    SLAM.Shutdown();
++
++    return 0;
++}
+diff --git a/Thirdparty/DBoW2/CMakeLists.txt b/Thirdparty/DBoW2/CMakeLists.txt
+index c312b25..518ddd0 100644
+--- a/Thirdparty/DBoW2/CMakeLists.txt
++++ b/Thirdparty/DBoW2/CMakeLists.txt
+@@ -5,8 +5,8 @@ if(NOT CMAKE_BUILD_TYPE)
+   set(CMAKE_BUILD_TYPE Release)
+ endif()
+ 
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3 -march=native ")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3 -march=native")
++set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}  -Wall  -O3 ")
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall  -O3")
+ 
+ set(HDRS_DBOW2
+   DBoW2/BowVector.h
+diff --git a/Thirdparty/g2o/CMakeLists.txt b/Thirdparty/g2o/CMakeLists.txt
+index 1a32ff9..1cb9b37 100644
+--- a/Thirdparty/g2o/CMakeLists.txt
++++ b/Thirdparty/g2o/CMakeLists.txt
+@@ -54,8 +54,8 @@ IF(OPENMP_FOUND AND G2O_USE_OPENMP)
+ ENDIF(OPENMP_FOUND AND G2O_USE_OPENMP)
+ 
+ # Compiler specific options for gcc
+-SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
+-SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
++SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
++SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
+ # SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+ # SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
+ 
+diff --git a/include/Frame.h b/include/Frame.h
+index 880d553..adbe3f2 100644
+--- a/include/Frame.h
++++ b/include/Frame.h
+@@ -66,7 +66,10 @@ public:
+     Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
+ 
+     // Constructor for Monocular cameras.
+-    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib(), cv::Ptr<cv::aruco::Dictionary> aruco_dict=cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50));
++    // OpenCV >= 4.7 changed getPredefinedDictionary() to return
++    // cv::aruco::Dictionary by value instead of cv::Ptr<Dictionary>; wrap
++    // it to keep this default argument's declared type.
++    Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, GeometricCamera* pCamera, cv::Mat &distCoef, const float &bf, const float &thDepth, Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib(), cv::Ptr<cv::aruco::Dictionary> aruco_dict=cv::makePtr<cv::aruco::Dictionary>(cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50)));
+ 
+     // Destructor
+     // ~Frame();
+diff --git a/include/System.h b/include/System.h
+index 58c245d..22d4ff0 100644
+--- a/include/System.h
++++ b/include/System.h
+@@ -106,7 +106,10 @@ public:
+         const bool bUseViewer = true, 
+         const string &load_atlas_path = std::string(),
+         const string &save_atlas_path = std::string(),
+-        const cv::Ptr<cv::aruco::Dictionary> aruco_dict=cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50),
++        // OpenCV >= 4.7 changed getPredefinedDictionary() to return
++        // cv::aruco::Dictionary by value instead of cv::Ptr<Dictionary>;
++        // wrap it to keep this default argument's declared type.
++        const cv::Ptr<cv::aruco::Dictionary> aruco_dict=cv::makePtr<cv::aruco::Dictionary>(cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50)),
+         const int init_tag_id=13,
+         const float init_tag_size=0.16
+     );
+diff --git a/src/Frame.cc b/src/Frame.cc
+index 393054a..e6b1253 100644
+--- a/src/Frame.cc
++++ b/src/Frame.cc
+@@ -43,7 +43,21 @@ float Frame::mfGridElementWidthInv, Frame::mfGridElementHeightInv;
+ cv::BFMatcher Frame::BFmatcher = cv::BFMatcher(cv::NORM_HAMMING);
+ 
+ Frame::Frame(): mpcpi(NULL), mpImuPreintegrated(NULL), mpPrevFrame(NULL), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false), mbHasPose(false), mbHasVelocity(false)
+-{}
++{
++    // Every other Frame constructor (see below) does
++    // mpMutexImu = new std::mutex(); -- this default (no-args) constructor
++    // didn't, leaving mpMutexImu as an uninitialized garbage pointer.
++    // Tracking's mLastFrame is default-constructed before any real frame
++    // exists, so on the very first TrackMonocular call,
++    // Frame::setIntegrated()'s lock(*mpMutexImu) dereferences that garbage
++    // pointer -- undefined behavior ported from a gdb-confirmed
++    // real-hardware fix (see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/), which
++    // manifested there as "terminate called after throwing an instance of
++    // 'std::system_error' what(): Operation not permitted" from within
++    // std::mutex::lock().
++    mpMutexImu = new std::mutex();
++}
+ 
+ 
+ //Copy Constructor
+@@ -97,6 +111,17 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+     // Frame ID
+     mnId=nNextId++;
+ 
++    // Must happen before any possible early return below (the
++    // mvKeys.empty() check) -- every other Frame member that a caller
++    // might touch after this constructor returns (setIntegrated() in
++    // particular) assumes mpMutexImu is non-null. Moved here from the end
++    // of this constructor: ported from a gdb-confirmed real-hardware fix
++    // (see envs/real/insta360_bridge/orb_slam3_hardware_fixes/), which
++    // manifested as "terminate called after throwing an instance of
++    // 'std::system_error' what(): Operation not permitted" when a
++    // degenerate (zero-keypoint) frame returned early leaving this null.
++    mpMutexImu = new std::mutex();
++
+     // Scale Level Info
+     mnScaleLevels = mpORBextractorLeft->GetLevels();
+     mfScaleFactor = mpORBextractorLeft->GetScaleFactor();
+@@ -157,8 +182,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+         mVw.setZero();
+     }
+ 
+-    mpMutexImu = new std::mutex();
+-
+     //Set no stereo fisheye information
+     Nleft = -1;
+     Nright = -1;
+@@ -180,6 +203,11 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+     // Frame ID
+     mnId=nNextId++;
+ 
++    // See the stereo constructor above for why this must happen before
++    // any possible early return (ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/).
++    mpMutexImu = new std::mutex();
++
+     // Scale Level Info
+     mnScaleLevels = mpORBextractorLeft->GetLevels();
+     mfScaleFactor = mpORBextractorLeft->GetScaleFactor();
+@@ -236,8 +264,6 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
+         mVw.setZero();
+     }
+ 
+-    mpMutexImu = new std::mutex();
+-
+     //Set no stereo fisheye information
+     Nleft = -1;
+     Nright = -1;
+@@ -260,6 +286,11 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
+     // Frame ID
+     mnId=nNextId++;
+ 
++    // See the stereo constructor above for why this must happen before
++    // any possible early return (ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/).
++    mpMutexImu = new std::mutex();
++
+     // Scale Level Info
+     mnScaleLevels = mpORBextractorLeft->GetLevels();
+     mfScaleFactor = mpORBextractorLeft->GetScaleFactor();
+@@ -270,7 +301,9 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
+     mvInvLevelSigma2 = mpORBextractorLeft->GetInverseScaleSigmaSquares();
+ 
+     // ArUcO detection
+-    cv::Ptr<cv::aruco::DetectorParameters> parameters = cv::aruco::DetectorParameters::create();
++    // OpenCV >= 4.7 removed DetectorParameters::create() -- it is now a
++    // plain default-constructible struct.
++    cv::Ptr<cv::aruco::DetectorParameters> parameters = cv::makePtr<cv::aruco::DetectorParameters>();
+     cv::aruco::detectMarkers(imGray, aruco_dict, markerCorners, markerIds, parameters, rejectedCandidates);
+ 
+     // ORB extraction
+@@ -337,8 +370,6 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
+     {
+         mVw.setZero();
+     }
+-
+-    mpMutexImu = new std::mutex();
+ }
+ 
+ 
+@@ -416,6 +447,29 @@ Eigen::Vector3f Frame::GetVelocity() const
+ 
+ void Frame::SetImuPoseVelocity(const Eigen::Matrix3f &Rwb, const Eigen::Vector3f &twb, const Eigen::Vector3f &Vwb)
+ {
++    // Rwb comes straight from an inertial pose optimizer's own vertex
++    // estimate, with no validation -- an ill-conditioned/under-constrained
++    // solve can leave it non-finite or non-orthogonal, and Sophus::SE3f's
++    // constructor below asserts the rotation is a valid SO3 element,
++    // aborting the whole process on "R is not orthogonal". Ported from a
++    // gdb-confirmed real-hardware fix (all-zero Rwb observed on real
++    // Insta360 X3 live IMU_MONOCULAR tracking; see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/). Skip this
++    // pose/velocity update rather than crash on a result this
++    // optimization attempt clearly failed to produce validly -- the frame
++    // keeps whatever pose it already had, which is far better than
++    // aborting.
++    const Eigen::Matrix3f orthogonality_error =
++        Rwb * Rwb.transpose() - Eigen::Matrix3f::Identity();
++    if (!Rwb.allFinite() || orthogonality_error.norm() > 1e-2f)
++    {
++        std::cerr << "Frame::SetImuPoseVelocity: rejecting non-finite/"
++                      "non-orthogonal Rwb from inertial pose optimizer, "
++                      "keeping previous pose"
++                   << std::endl;
++        return;
++    }
++
+     mVw = Vwb;
+     mbHasVelocity = true;
+ 
+@@ -1003,6 +1057,11 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+     // Frame ID
+     mnId=nNextId++;
+ 
++    // See the stereo constructor above for why this must happen before
++    // any possible early return (ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/).
++    mpMutexImu = new std::mutex();
++
+     // Scale Level Info
+     mnScaleLevels = mpORBextractorLeft->GetLevels();
+     mfScaleFactor = mpORBextractorLeft->GetScaleFactor();
+@@ -1060,8 +1119,6 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
+ 
+     AssignFeaturesToGrid();
+ 
+-    mpMutexImu = new std::mutex();
+-
+     UndistortKeyPoints();
+ 
+ }
+diff --git a/src/ImuTypes.cc b/src/ImuTypes.cc
+index ec82cba..3721ec1 100644
+--- a/src/ImuTypes.cc
++++ b/src/ImuTypes.cc
+@@ -22,6 +22,7 @@
+ #include "GeometricTools.h"
+ 
+ #include<iostream>
++#include<cmath>
+ 
+ namespace ORB_SLAM3
+ {
+@@ -176,6 +177,29 @@ void Preintegrated::Reintegrate()
+ 
+ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration, const Eigen::Vector3f &angVel, const float &dt)
+ {
++    // dt must be strictly positive: every term below (avgA/avgW's
++    // dT+dt denominator, the dR*dt/dt*dt integration steps, JRg/JVg/JPg
++    // bias-Jacobian updates) assumes a forward-in-time step. A
++    // non-positive or non-finite dt here corrupts this object's internal
++    // state PERMANENTLY (dR/JRg etc. accumulate incrementally, so one bad
++    // step poisons every later GetDeltaRotation/GetDeltaVelocity call with
++    // NaN) -- ported from a gdb-confirmed real-hardware fix (Insta360 X3
++    // live IMU_MONOCULAR tracking, "Sophus SO3::exp failed! omega: nan nan
++    // nan" inside EdgeInertial::computeError) made against the previously
++    // vendored UZ-SLAMLab/ORB_SLAM3 build -- see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/. Skip the update
++    // rather than let a single degenerate step (e.g. from
++    // Tracking::PreintegrateIMU's linear interpolation hitting a
++    // zero/negative time gap between two queued IMU samples) propagate
++    // forever.
++    if (!(dt > 0.0f) || !std::isfinite(dt))
++    {
++        std::cerr << "IMU::Preintegrated::IntegrateNewMeasurement: "
++                      "skipping degenerate step, dt="
++                   << dt << std::endl;
++        return;
++    }
++
+     mvMeasurements.push_back(integrable(acceleration,angVel,dt));
+ 
+     // Position is updated firstly, as it depends on previously computed velocity and rotation.
+@@ -285,7 +309,26 @@ Eigen::Matrix3f Preintegrated::GetDeltaRotation(const Bias &b_)
+     std::unique_lock<std::mutex> lock(mMutex);
+     Eigen::Vector3f dbg;
+     dbg << b_.bwx-b.bwx,b_.bwy-b.bwy,b_.bwz-b.bwz;
+-    return NormalizeRotation(dR * Sophus::SO3f::exp(JRg * dbg).matrix());
++    // JRg*dbg is a first-order linearization of how dR changes with bias,
++    // only valid for a small bias delta. b_ comes from the optimizer's
++    // current bias-vertex ESTIMATE, which can run away (e.g. under a
++    // poorly-conditioned/under-excited inertial optimization) to a value
++    // the linearization was never valid for, producing a non-finite
++    // Sophus::SO3f::exp() argument -- ported from a gdb-confirmed
++    // real-hardware fix (see ImuTypes.cc's IntegrateNewMeasurement comment
++    // above and envs/real/insta360_bridge/orb_slam3_hardware_fixes/).
++    // Skip the (already-invalid) correction rather than propagate
++    // non-finite state into the optimizer.
++    const Eigen::Vector3f domega = JRg * dbg;
++    if (!domega.allFinite())
++    {
++        std::cerr << "IMU::Preintegrated::GetDeltaRotation: bias delta "
++                      "produced a non-finite rotation correction, using "
++                      "uncorrected dR"
++                   << std::endl;
++        return NormalizeRotation(dR);
++    }
++    return NormalizeRotation(dR * Sophus::SO3f::exp(domega).matrix());
+ }
+ 
+ Eigen::Vector3f Preintegrated::GetDeltaVelocity(const Bias &b_)
+diff --git a/src/LocalMapping.cc b/src/LocalMapping.cc
+index 4ec5e4f..e7c61ad 100644
+--- a/src/LocalMapping.cc
++++ b/src/LocalMapping.cc
+@@ -1184,7 +1184,31 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
+             (*itKF)->mPrevKF->SetVelocity(_vel);
+         }
+ 
+-        dirG = dirG/dirG.norm();
++        // dirG is only accumulated from keyframes with a valid
++        // mpImuPreintegrated; with a frame-driven (~30fps) tracking
++        // trigger, a burst of keyframes can all land in gaps between real
++        // gyro samples and end up with no preintegrated IMU data at all,
++        // leaving dirG at (or near) the zero vector. Dividing by its ~0
++        // norm produced NaN here, which fed directly into
++        // Sophus::SO3f::exp(vzg) below and crashed with "SO3::exp failed!
++        // omega: nan nan nan" -- ported from a gdb-confirmed real-hardware
++        // fix (Insta360 X3 live IMU_MONOCULAR tracking; see
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/). Bail out
++        // like the "scale too small" case elsewhere does: this
++        // initialization attempt is abandoned, but LocalMapping calls
++        // InitializeIMU again as more (better IMU-linked) keyframes
++        // accumulate.
++        const float dirG_norm = dirG.norm();
++        if (!(dirG_norm > 1e-6))
++        {
++            cout << "IMU gravity-direction estimate degenerate (too few "
++                    "keyframes with preintegrated IMU data) -- skipping "
++                    "this IMU initialization attempt"
++                 << endl;
++            bInitializing = false;
++            return;
++        }
++        dirG = dirG/dirG_norm;
+         Eigen::Vector3f gI(0.0f, 0.0f, -1.0f);
+         Eigen::Vector3f v = gI.cross(dirG);
+         const float nv = v.norm();
+diff --git a/src/Optimizer.cc b/src/Optimizer.cc
+index c63fe45..dbe861b 100644
+--- a/src/Optimizer.cc
++++ b/src/Optimizer.cc
+@@ -3186,6 +3186,29 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
+         }
+     }
+ 
++    // Each keyframe skipped above (missing mpImuPreintegrated, bad flag,
++    // etc.) leaves the gravity/scale/bias vertices with one fewer
++    // constraining edge. With too few real edges the problem is
++    // under-constrained/ill-conditioned, and g2o's Gauss-Newton solver can
++    // produce a wild (NaN-inducing) update -- ported from a gdb-confirmed
++    // real-hardware fix (EdgeInertialGS::computeError() crashing with
++    // "Sophus SO3::exp failed! omega: nan nan nan" from exactly such an
++    // update; see envs/real/insta360_bridge/orb_slam3_hardware_fixes/).
++    // Mirror the "scale too small" bail-out this function's caller
++    // (LocalMapping::InitializeIMU) already checks for (mScale<1e-1)
++    // instead of letting an under-constrained optimize() run: skip it and
++    // signal failure via scale=0 so this initialization attempt is
++    // abandoned and retried later once more keyframes have valid
++    // preintegration.
++    if (vpei.size() < 3)
++    {
++        cout << "InertialOptimization: too few valid inertial edges ("
++             << vpei.size() << ") -- skipping optimize() to avoid an "
++                "ill-conditioned solve" << endl;
++        scale = 0;
++        return;
++    }
++
+     // Compute error for different scales
+     std::set<g2o::HyperGraph::Edge*> setEdges = optimizer.edges();
+ 
+@@ -4663,6 +4686,21 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
+     nInitialCorrespondences = nInitialMonoCorrespondences + nInitialStereoCorrespondences;
+ 
+     KeyFrame* pKF = pFrame->mpLastKeyFrame;
++    if (!pKF)
++    {
++        // Confirmed via real hardware (Insta360 X3 live IMU_MONOCULAR)
++        // gdb backtrace: GetImuPosition() -> pthread_mutex_lock on a null
++        // `this`, from VertexPose::VertexPose(pKF) below with
++        // pKF==nullptr. Tracking.cc only calls this function once it
++        // believes IMU is initialized and well past a reset, assuming
++        // mpLastKeyFrame is always valid by then -- but a concurrent
++        // reset in LocalMapping's own thread can still leave a
++        // stale/null pointer here. Returning 0 inliers (same as "this
++        // pose estimate failed") lets the normal tracking-lost/
++        // relocalization path handle it instead of crashing. See
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++        return 0;
++    }
+     VertexPose* VPk = new VertexPose(pKF);
+     VPk->setId(4);
+     VPk->setFixed(true);
+@@ -4680,6 +4718,20 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
+     VAk->setFixed(true);
+     optimizer.addVertex(VAk);
+ 
++    if (!pFrame->mpImuPreintegrated)
++    {
++        // EdgeInertial's constructor dereferences its argument immediately
++        // (JRg/JVg/.../dT), so this crashes identically to the
++        // mpLastKeyFrame case above if the current frame's own
++        // preintegration is null -- which it can be: Tracking::
++        // PreintegrateIMU() returns early ("Empty IMU measurements
++        // vector!!!") without (re)assigning mCurrentFrame.mpImuPreintegrated
++        // when no IMU samples fell in this frame's window, a condition
++        // routinely hit on gyro-batching camera hardware. Return 0
++        // inliers, same as the mpLastKeyFrame==nullptr case. See
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++        return 0;
++    }
+     EdgeInertial* ei = new EdgeInertial(pFrame->mpImuPreintegrated);
+ 
+     ei->setVertex(0, VPk);
+@@ -5048,6 +5100,17 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
+ 
+     // Set Previous Frame Vertex
+     Frame* pFp = pFrame->mpPrevFrame;
++    if (!pFp)
++    {
++        // Same class of bug as PoseInertialOptimizationLastKeyFrame's
++        // mpLastKeyFrame fix (see that comment) -- pFp is used
++        // unconditionally below (only pFp->mpcpi gets a null check,
++        // never pFp itself), which crashes identically if mpPrevFrame is
++        // null. Return 0 inliers so tracking treats this as a failed pose
++        // estimate instead of crashing. See
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++        return 0;
++    }
+ 
+     VertexPose* VPk = new VertexPose(pFp);
+     VPk->setId(4);
+@@ -5066,6 +5129,17 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
+     VAk->setFixed(false);
+     optimizer.addVertex(VAk);
+ 
++    if (!pFrame->mpImuPreintegratedFrame)
++    {
++        // Same class of bug as PoseInertialOptimizationLastKeyFrame's
++        // mpImuPreintegrated fix (see that comment) -- Tracking::
++        // PreintegrateIMU() can leave the current frame's own
++        // mpImuPreintegratedFrame null ("Empty IMU measurements
++        // vector!!!"), and EdgeInertial's constructor dereferences its
++        // argument immediately. See
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++        return 0;
++    }
+     EdgeInertial* ei = new EdgeInertial(pFrame->mpImuPreintegratedFrame);
+ 
+     ei->setVertex(0, VPk);
+@@ -5090,19 +5164,35 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
+     ear->setInformation(InfoA);
+     optimizer.addEdge(ear);
+ 
++    // Declared here (not inside the if/else below) and left null when
++    // pFp->mpcpi doesn't exist, since it's also read much further down
++    // (H.block<15,15>(0,0) += ep->GetHessian()).
++    EdgePriorPoseImu* ep = nullptr;
+     if (!pFp->mpcpi)
++    {
++        // Ported real-hardware fix: this used to fall through into
++        // new EdgePriorPoseImu(pFp->mpcpi) unconditionally, and that
++        // constructor dereferences its argument immediately.
++        // pFp->mpcpi is only set once IMU initialization has produced a
++        // pose-prior constraint for that frame; skipping this optional
++        // prior edge when it doesn't exist yet is safe -- the rest of the
++        // pose optimization below doesn't depend on it. See
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
+         Verbose::PrintMess("pFp->mpcpi does not exist!!!\nPrevious Frame " + to_string(pFp->mnId), Verbose::VERBOSITY_NORMAL);
+-
+-    EdgePriorPoseImu* ep = new EdgePriorPoseImu(pFp->mpcpi);
+-
+-    ep->setVertex(0,VPk);
+-    ep->setVertex(1,VVk);
+-    ep->setVertex(2,VGk);
+-    ep->setVertex(3,VAk);
+-    g2o::RobustKernelHuber* rkp = new g2o::RobustKernelHuber;
+-    ep->setRobustKernel(rkp);
+-    rkp->setDelta(5);
+-    optimizer.addEdge(ep);
++    }
++    else
++    {
++        ep = new EdgePriorPoseImu(pFp->mpcpi);
++
++        ep->setVertex(0,VPk);
++        ep->setVertex(1,VVk);
++        ep->setVertex(2,VGk);
++        ep->setVertex(3,VAk);
++        g2o::RobustKernelHuber* rkp = new g2o::RobustKernelHuber;
++        ep->setRobustKernel(rkp);
++        rkp->setDelta(5);
++        optimizer.addEdge(ep);
++    }
+ 
+     // We perform 4 optimizations, after each optimization we classify observation as inlier/outlier
+     // At the next optimization, outliers are not included, but at the end they can be classified as inliers again.
+@@ -5258,7 +5348,8 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
+     H.block<3,3>(27,12) += Har.block<3,3>(3,0);
+     H.block<3,3>(27,27) += Har.block<3,3>(3,3);
+ 
+-    H.block<15,15>(0,0) += ep->GetHessian();
++    if (ep)
++        H.block<15,15>(0,0) += ep->GetHessian();
+ 
+     int tot_in = 0, tot_out = 0;
+     for(size_t i=0, iend=vpEdgesMono.size(); i<iend; i++)
+diff --git a/src/System.cc b/src/System.cc
+index 15c28e2..d12f71b 100644
+--- a/src/System.cc
++++ b/src/System.cc
+@@ -617,7 +617,7 @@ void System::SaveTrajectoryCSV(const string &filename)
+     // Select the appropriate Map
+     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+     int numMaxKFs = 0;
+-    Map* pBiggerMap;
++    Map* pBiggerMap = nullptr;
+     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
+     for(Map* pMap :vpMaps)
+     {
+@@ -629,6 +629,16 @@ void System::SaveTrajectoryCSV(const string &filename)
+         }
+     }
+ 
++    // Ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/: an empty atlas
++    // (e.g. SLAM never initialized a map before shutdown) left pBiggerMap
++    // uninitialized and crashed below.
++    if(!pBiggerMap)
++    {
++        std::cout << "There is not a map!!" << std::endl;
++        return;
++    }
++
+     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
+     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+ 
+@@ -728,7 +738,7 @@ void System::SaveTrajectoryTUM(const string &filename)
+ 
+     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+     int numMaxKFs = 0;
+-    Map* pBiggerMap;
++    Map* pBiggerMap = nullptr;
+     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
+     for(Map* pMap :vpMaps)
+     {
+@@ -740,6 +750,16 @@ void System::SaveTrajectoryTUM(const string &filename)
+         }
+     }
+ 
++    // Ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/: an empty atlas
++    // (e.g. SLAM never initialized a map before shutdown) left pBiggerMap
++    // uninitialized and crashed below.
++    if(!pBiggerMap)
++    {
++        std::cout << "There is not a map!!" << std::endl;
++        return;
++    }
++
+     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
+     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+ 
+@@ -842,7 +862,7 @@ void System::SaveTrajectoryEuRoC(const string &filename)
+ 
+     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+     int numMaxKFs = 0;
+-    Map* pBiggerMap;
++    Map* pBiggerMap = nullptr;
+     std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
+     for(Map* pMap :vpMaps)
+     {
+@@ -854,6 +874,16 @@ void System::SaveTrajectoryEuRoC(const string &filename)
+         }
+     }
+ 
++    // Ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/: an empty atlas
++    // (e.g. SLAM never initialized a map before shutdown) left pBiggerMap
++    // uninitialized and crashed below.
++    if(!pBiggerMap)
++    {
++        std::cout << "There is not a map!!" << std::endl;
++        return;
++    }
++
+     vector<KeyFrame*> vpKFs = pBiggerMap->GetAllKeyFrames();
+     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+ 
+@@ -1230,7 +1260,14 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
+     cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+ 
+     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+-    Map* pBiggerMap;
++    // Ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/README.md: an
++    // uninitialized pBiggerMap here (left as garbage stack memory when no
++    // map in vpMaps has any keyframes) made the `if(!pBiggerMap)` guard
++    // below unreliable -- confirmed via gdb as a real SIGSEGV
++    // (pthread_mutex_lock on a wild pointer inside
++    // Map::GetAllKeyFrames()) when every map in the atlas had 0 keyframes.
++    Map* pBiggerMap = nullptr;
+     int numMaxKFs = 0;
+     for(Map* pMap :vpMaps)
+     {
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 2c2b4b7..54bd0f1 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1278,10 +1278,26 @@ void Tracking::PreintegrateIMU()
+         {
+             float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
+             float tini = mvImuFromLastFrame[i].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+-            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+-                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
+-            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+-                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tini/tab))*0.5f;
++            // tab is a denominator below; two queued IMU samples with a
++            // zero/negative time gap (out-of-order or duplicate
++            // timestamps) would make (tini/tab) inf/nan, corrupting acc/
++            // angVel and, via IntegrateNewMeasurement, this preintegration
++            // permanently. Fall back to the raw (non-extrapolated) sample
++            // instead of dividing by a degenerate tab. Ported real-
++            // hardware fix, see
++            // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++            if (tab > 0.0f)
++            {
++                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
++                        (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
++                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
++                        (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tini/tab))*0.5f;
++            }
++            else
++            {
++                acc = mvImuFromLastFrame[i].a;
++                angVel = mvImuFromLastFrame[i].w;
++            }
+             tstep = mvImuFromLastFrame[i+1].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+         }
+         else if(i<(n-1))
+@@ -1294,10 +1310,20 @@ void Tracking::PreintegrateIMU()
+         {
+             float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
+             float tend = mvImuFromLastFrame[i+1].t-mCurrentFrame.mTimeStamp;
+-            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+-                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tend/tab))*0.5f;
+-            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+-                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tend/tab))*0.5f;
++            // See the (i==0)&&(i<(n-1)) branch above for why tab needs
++            // this guard.
++            if (tab > 0.0f)
++            {
++                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
++                        (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tend/tab))*0.5f;
++                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
++                        (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tend/tab))*0.5f;
++            }
++            else
++            {
++                acc = mvImuFromLastFrame[i].a;
++                angVel = mvImuFromLastFrame[i].w;
++            }
+             tstep = mCurrentFrame.mTimeStamp-mvImuFromLastFrame[i].t;
+         }
+         else if((i==0) && (i==(n-1)))
+@@ -1331,7 +1357,7 @@ bool Tracking::PredictStateIMU()
+         return false;
+     }
+ 
+-    if(mbMapUpdated && mpLastKeyFrame)
++    if(mbMapUpdated && mpLastKeyFrame && mpImuPreintegratedFromLastKF)
+     {
+         const Eigen::Vector3f twb1 = mpLastKeyFrame->GetImuPosition();
+         const Eigen::Matrix3f Rwb1 = mpLastKeyFrame->GetImuRotation();
+@@ -1349,8 +1375,17 @@ bool Tracking::PredictStateIMU()
+         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+         return true;
+     }
+-    else if(!mbMapUpdated)
+-    {
++    else if(!mbMapUpdated && mCurrentFrame.mpImuPreintegratedFrame)
++    {
++        // mCurrentFrame.mpImuPreintegratedFrame can be null here:
++        // Tracking::PreintegrateIMU() returns early ("Empty IMU
++        // measurements vector!!!", routine on gyro-batching hardware)
++        // without (re)assigning it for every frame. Falling through to
++        // `return false` below (same as the other guarded branches in
++        // this function) is safe -- it just means this frame's pose
++        // can't be IMU-predicted, same as if mpLastKeyFrame were null
++        // above. Ported real-hardware fix, see
++        // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
+         const Eigen::Vector3f twb1 = mLastFrame.GetImuPosition();
+         const Eigen::Matrix3f Rwb1 = mLastFrame.GetImuRotation();
+         const Eigen::Vector3f Vwb1 = mLastFrame.GetVelocity();
+@@ -3725,26 +3760,38 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
+     }
+ 
+ 
+-    if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
++    // mpLastKeyFrame can be null here: Tracking::PreintegrateIMU()
++    // returning early on an empty IMU window ("Empty IMU measurements
++    // vector!!!", routine on gyro-batching hardware) doesn't guarantee
++    // mpLastKeyFrame gets (re)assigned for every frame, but this function
++    // unconditionally dereferenced it in both branches below. Skipping
++    // the pose/velocity update for a frame with no last-keyframe link is
++    // safe -- it just leaves that frame's IMU-derived pose as whatever it
++    // already was. Ported real-hardware fix, see
++    // envs/real/insta360_bridge/orb_slam3_hardware_fixes/.
++    if (mLastFrame.mpLastKeyFrame)
+     {
+-        mLastFrame.SetImuPoseVelocity(mLastFrame.mpLastKeyFrame->GetImuRotation(),
+-                                      mLastFrame.mpLastKeyFrame->GetImuPosition(),
+-                                      mLastFrame.mpLastKeyFrame->GetVelocity());
+-    }
+-    else
+-    {
+-        const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+-        const Eigen::Vector3f twb1 = mLastFrame.mpLastKeyFrame->GetImuPosition();
+-        const Eigen::Matrix3f Rwb1 = mLastFrame.mpLastKeyFrame->GetImuRotation();
+-        const Eigen::Vector3f Vwb1 = mLastFrame.mpLastKeyFrame->GetVelocity();
+-        float t12 = mLastFrame.mpImuPreintegrated->dT;
++        if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
++        {
++            mLastFrame.SetImuPoseVelocity(mLastFrame.mpLastKeyFrame->GetImuRotation(),
++                                          mLastFrame.mpLastKeyFrame->GetImuPosition(),
++                                          mLastFrame.mpLastKeyFrame->GetVelocity());
++        }
++        else
++        {
++            const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
++            const Eigen::Vector3f twb1 = mLastFrame.mpLastKeyFrame->GetImuPosition();
++            const Eigen::Matrix3f Rwb1 = mLastFrame.mpLastKeyFrame->GetImuRotation();
++            const Eigen::Vector3f Vwb1 = mLastFrame.mpLastKeyFrame->GetVelocity();
++            float t12 = mLastFrame.mpImuPreintegrated->dT;
+ 
+-        mLastFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
+-                                      twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
+-                                      Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
++            mLastFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
++                                          twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
++                                          Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
++        }
+     }
+ 
+-    if (mCurrentFrame.mpImuPreintegrated)
++    if (mCurrentFrame.mpImuPreintegrated && mCurrentFrame.mpLastKeyFrame)
+     {
+         const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+ 
