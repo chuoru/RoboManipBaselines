@@ -301,10 +301,112 @@ your shell, before running any `basalt_*` command below).
    output convention against ORB-SLAM3's `IMU.T_b_c1` = camera-to-body
    before copying) is the extrinsic to paste into `Insta360_X4.yaml`.
 
-Not yet done: an actual calibration recording+run (this only sets up and
-smoke-tests the tooling/pipeline -- confirmed `basalt_calibrate` loads a
-real converted recording without error, but no target has actually been
-photographed for a real calibration yet).
+Not yet done (as of when this section was written): an actual calibration
+recording+run via this Basalt path (this only sets up and smoke-tests the
+tooling/pipeline -- confirmed `basalt_calibrate` loads a real converted
+recording without error, but no target had actually been photographed for
+a real calibration yet). `Insta360_X4.yaml`'s own header comments document
+real Basalt runs completed later, with results noticeably rougher on the
+extrinsic (15.0px reprojection) than this path's own 0.66px first-unit
+number -- see the next section for the current recommended alternative.
+
+### Camera-IMU joint calibration via OpenImuCameraCalibrator (current default)
+
+[`OpenImuCameraCalibrator`](https://github.com/urbste/OpenImuCameraCalibrator)
+(OpenICC) -- the tool UMI's own SLAM recipe uses for GoPro -- is now
+preferred over the Basalt path above: it gave UMI's team good results on a
+similarly wide-FOV action camera, and its own per-run reprojection-error
+output makes it easy to directly compare against the numbers already
+recorded in `Insta360_X4.yaml`'s header. It has no GoPro-specific
+dependency in its *calibration* step (only its `run_gopro_calibration.py`
+convenience script assumes GPMF telemetry muxed into the video -- irrelevant
+here either way, since Insta360 has no such muxing); the smartphone/Pilotguru
+path (originally written for a phone with a separately-recorded IMU stream,
+documented in its `docs/samsung_s20_calibration.md`) is the structurally
+closest match to this bridge's own `--record` output (separate video +
+IMU csv), so that's what `calibration/convert_record_to_openicc.py` targets.
+
+**Build** (not yet packaged as a simple installer, unlike Basalt above):
+1. `git clone https://github.com/urbste/OpenImuCameraCalibrator.git` --
+   NOT vendored as a submodule of this repo (see the commit that added it
+   for why: it only needs a one-time system-wide `find_package(Theia)`,
+   not an in-tree link, so pinning it in-tree just adds friction for no
+   benefit).
+2. Its `find_package(Theia REQUIRED)` needs
+   [`urbste/pyTheiaSfM`](https://github.com/urbste/pyTheiaSfM) built+installed
+   first, at the exact commit OpenICC's own `Dockerfile` pins (`69c3d37`) --
+   clone that as a **plain** clone too (its own CMake git-hook-install logic
+   breaks if cloned as a submodule, since `.git` is then a gitlink file, not
+   a directory), `git checkout 69c3d37`, then `cmake -DCMAKE_BUILD_TYPE=Release
+   -DCMAKE_INSTALL_PREFIX=<prefix> && make install`.
+3. pyTheiaSfM needs Ceres **>= 2.1** (`ceres::Manifold`/`SetManifold` --
+   this repo's system Ceres may be older, e.g. 2.0.0 on Ubuntu 22.04's own
+   package; confirmed building Ceres 2.1.0 from source to the same
+   `<prefix>` and pointing pyTheiaSfM's `-DCMAKE_PREFIX_PATH=<prefix>` at
+   it fixes a `'Manifold' is not a member of 'ceres'` compile error).
+4. Build OpenICC itself: `cmake -DCMAKE_PREFIX_PATH=<prefix>
+   -DCMAKE_BUILD_TYPE=Release && make`, then `pip install -r requirements.txt`.
+
+**KNOWN BUILD BLOCKER on OpenCV >= 4.7** (confirmed against OpenCV 4.11):
+`src/core/board_extractor.cc` (ChArUco board detection) and
+`camera_calibrator.cc` are written against OpenCV's pre-4.7 **legacy**
+`aruco` contrib module (`cv::aruco::DetectorParameters::create()`,
+`cv::aruco::CharucoBoard::create()`, a `.chessboardCorners` member,
+`#include <opencv2/aruco/dictionary.hpp>`), which OpenCV 4.7 restructured
+into the `objdetect` module with a constructor/class-based API instead (no
+`::create()`, no that header path, `CharucoBoard`'s corners now behind
+`getChessboardCorners()`) -- and, unlike the handful of call sites this
+same break caused in `third_party/ORB_SLAM3` (fixed by wrapping return
+values in `cv::makePtr<...>`, see
+`orb_slam3_hardware_fixes/README.md`), OpenICC's break is NOT a mechanical
+fix: `cv::aruco::interpolateCornersCharuco` (the function
+`board_extractor.cc`'s detection loop is actually built around) was
+**removed entirely**, replaced by a different, class-based workflow
+(`cv::aruco::CharucoDetector::detectBoard()`) with no 1:1 call-for-call
+equivalent. Porting this properly means rewriting
+`BoardExtractor::InitializeCharucoBoard`/its detection loop against the new
+`CharucoDetector` API, which needs real calibration-board imagery to verify
+corner-detection correctness against -- not something to do blind. Lowest-risk
+options, in order: (a) build against an OpenCV < 4.7 (matching OpenICC's own
+`Dockerfile`, which apt-installs Ubuntu 22.04's `libopencv-contrib-dev` --
+check what version that resolves to on your system before assuming it's new
+enough to hit this), e.g. via a pinned conda env; (b) do the `CharucoDetector`
+port yourself with board images in hand to validate against; (c) fall back to
+`--board_type=apriltag` (`InitializeAprilBoard`, a separate code path in
+`board_extractor.cc` -- not checked for the same break, but not confirmed
+clean either) instead of the default ChArUco board.
+
+**Run** (per calibration session -- recapture if you get a new camera unit,
+same as the Basalt path above):
+1. Capture 3 recordings via the bridge's existing `--record` mode (same
+   command as step 2 of the Basalt section above, run 3 times):
+   - `cam`: slowly circle the printed checkerboard/ChArUco board for
+     ~20-30s (intrinsics).
+   - `imu_bias`: camera stationary for ~10-20s (IMU bias).
+   - `cam_imu`: fast motion exciting all 6 DOF, avoiding motion blur
+     (extrinsics + time offset).
+2. Convert each into OpenICC's dataset layout: `python3
+   calibration/convert_record_to_openicc.py <prefix> <OpenICCDataset_dir>
+   --role {cam,imu_bias,cam_imu}` (once per recording/role).
+3. Calibration board: start with OpenICC's own ready-made ChArUco board
+   (`resource/board.png` + `resource/charuco_detector_params.yml`, its
+   default) -- lower risk than regenerating this bridge's existing
+   AprilGrid tooling (`gen_aprilgrid.py` etc., currently sized for Basalt's
+   2-cell-border minimal grid, not verified at OpenICC's expected scale/
+   border convention).
+4. Run: `python3 python/run_smartphone_calibration.py
+   --path_calib_dataset=<OpenICCDataset_dir> --checker_size_m=<measured>
+   --camera_model=FISHEYE --known_gravity_axis=UNKOWN` (note: `UNKOWN`,
+   not a typo in this doc -- that's the actual argparse choice spelling
+   upstream). `FISHEYE` is OpenICC's closest match to
+   `Insta360_X4.yaml`'s `KannalaBrandt8` model (both Kannala-Brandt-family
+   equidistant models).
+5. Compare the printed reprojection-error stats against
+   `Insta360_X4.yaml`'s documented 0.48-15.0px range (particularly the
+   extrinsic, the current weak point at 15.0px) before trusting the new
+   numbers over the existing ones; paste `Camera1.*`/`IMU.T_b_c1` in if
+   they're a clear improvement, following the same inline-documentation
+   style the file's header already uses for every prior calibration run.
 
 ## Run
 

@@ -72,6 +72,20 @@ class DataKey:
     # command counterpart, as this is a passive sensor reading.
     MEASURED_WEIGHT = "measured_weight"
 
+    # SLAM-derived end-effector pose (tx, ty, tz, qw, qx, qy, qz), from an
+    # Insta360 camera mounted on the EEF, tracked offline via
+    # misc/insta360_slam_pipeline/ and transformed into the EEF frame via a
+    # calibrated camera-to-EEF extrinsic (see
+    # teleop/calibrate_insta360_eef_extrinsic.py). Independent of
+    # MEASURED_EEF_POSE, which comes from the robot's own forward
+    # kinematics -- this is only populated for an episode once that offline
+    # post-processing has been run on it (see
+    # misc/insta360_slam_pipeline/AddSlamPoseToRmb.py), so, like
+    # MEASURED_WEIGHT, it is env/episode-specific rather than universally
+    # present. There is no command counterpart, as this is a passive
+    # (post-hoc) sensor-derived measurement.
+    MEASURED_CAMERA_EEF_POSE = "measured_camera_eef_pose"
+
     # All keys of measured data
     MEASURED_DATA_KEYS = [
         MEASURED_JOINT_POS,
@@ -86,6 +100,7 @@ class DataKey:
         MEASURED_EEF_WRENCH,
         MEASURED_MOBILE_OMNI_VEL,
         MEASURED_WEIGHT,
+        MEASURED_CAMERA_EEF_POSE,
     ]
 
     # All keys of command data
@@ -165,6 +180,12 @@ class DataKey:
                 return 7 * num_eef
             else:
                 return 6 * num_eef
+        elif key == DataKey.MEASURED_CAMERA_EEF_POSE:
+            # Same (tx,ty,tz,qw,qx,qy,qz) shape as MEASURED_EEF_POSE, but
+            # only ever for a single camera-tracked EEF, regardless of
+            # get_num_eef(env) -- a multi-arm rig has only one Insta360
+            # camera's worth of SLAM trajectory.
+            return 7
         elif key in (DataKey.MEASURED_MOBILE_OMNI_VEL, DataKey.COMMAND_MOBILE_OMNI_VEL):
             return 3
         elif key == DataKey.MEASURED_WEIGHT:

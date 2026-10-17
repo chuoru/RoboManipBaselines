@@ -96,15 +96,32 @@ def resize_images(images, out_res):
 
 
 class ConvertRmbDataToUmiZarr:
-    def __init__(self, path, output, image_size, compressor, robot_prefix):
+    def __init__(self, path, output, image_size, compressor, robot_prefix, pose_source):
         self.rmb_path_list = find_rmb_files(path)
         self.output = output
         self.image_size = tuple(int(x) for x in image_size.split(","))
         self.compressor = compressor
         self.robot_prefix = robot_prefix
+        self.pose_source = pose_source
 
     def load_episode_data(self, rmb_data):
-        measured_eef_pose = rmb_data[DataKey.MEASURED_EEF_POSE][:]
+        # See --pose_source: DataKey.MEASURED_EEF_POSE (robot FK, always
+        # present) vs. DataKey.MEASURED_CAMERA_EEF_POSE (SLAM-derived, only
+        # present on episodes post-processed by
+        # misc/insta360_slam_pipeline/AddSlamPoseToRmb.py).
+        if self.pose_source == "slam" and DataKey.MEASURED_CAMERA_EEF_POSE not in rmb_data:
+            raise ValueError(
+                f"[{self.__class__.__name__}] --pose_source slam was requested, "
+                f"but {DataKey.MEASURED_CAMERA_EEF_POSE} is absent from this "
+                "episode -- run misc/insta360_slam_pipeline/AddSlamPoseToRmb.py "
+                "on it first."
+            )
+        pose_key = (
+            DataKey.MEASURED_CAMERA_EEF_POSE
+            if self.pose_source == "slam"
+            else DataKey.MEASURED_EEF_POSE
+        )
+        measured_eef_pose = rmb_data[pose_key][:]
         eef_pos, eef_rot_axis_angle = eef_pose_to_pos_axis_angle(measured_eef_pose)
 
         gripper_width = rmb_data[DataKey.MEASURED_GRIPPER_JOINT_POS][:].astype(
@@ -188,6 +205,17 @@ if __name__ == "__main__":
         help="key prefix for the arm (e.g. 'robot0', 'robot1' for a second arm "
         "in a dual-arm recording converted separately)",
     )
+    parser.add_argument(
+        "--pose_source",
+        type=str,
+        default="fk",
+        choices=["fk", "slam"],
+        help="'fk' (default): DataKey.MEASURED_EEF_POSE, from the robot's own "
+        "forward kinematics. 'slam': DataKey.MEASURED_CAMERA_EEF_POSE, the "
+        "Insta360-camera SLAM-derived pose (see "
+        "misc/insta360_slam_pipeline/AddSlamPoseToRmb.py) -- only usable on "
+        "episodes that script has already post-processed.",
+    )
     args = parser.parse_args()
 
     converter = ConvertRmbDataToUmiZarr(
@@ -196,5 +224,6 @@ if __name__ == "__main__":
         image_size=args.image_size,
         compressor=args.compressor,
         robot_prefix=args.robot_prefix,
+        pose_source=args.pose_source,
     )
     converter.convert()

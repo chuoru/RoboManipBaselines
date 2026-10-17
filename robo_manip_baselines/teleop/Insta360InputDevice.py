@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pinocchio as pin
 
-from robo_manip_baselines.common import read_insta360_message
+from robo_manip_baselines.common import encode_insta360_message, read_insta360_message
 
 from .InputDeviceBase import InputDeviceBase
 
@@ -124,6 +124,17 @@ class Insta360InputDevice(InputDeviceBase):
         self._pose_lock = threading.Lock()
         self._latest_pose_message = None
 
+        # For start_recording()/stop_recording() (per-episode on-device
+        # recording for offline SLAM post-processing, see
+        # envs/real/insta360_bridge/main.cc's recording-control callback) --
+        # the reply to a control message sent on self._connection arrives
+        # back through the SAME connection's _read_bridge_loop, since this
+        # socket is bidirectional, so it's captured there rather than via a
+        # separate blocking recv() that would race with that loop.
+        self._recording_reply_lock = threading.Lock()
+        self._recording_reply_event = threading.Event()
+        self._latest_recording_reply = None
+
     def connect(self):
         self.enabled_teleop = False
         self.insta360_se3_at_enable = None
@@ -191,6 +202,12 @@ class Insta360InputDevice(InputDeviceBase):
                         f"bridge '{self.name}': {e}"
                     )
                 break
+
+            if message["type"] in ("recording_started", "recording_stopped"):
+                with self._recording_reply_lock:
+                    self._latest_recording_reply = message
+                self._recording_reply_event.set()
+                continue
 
             if message["type"] != "pose":
                 continue
@@ -369,6 +386,70 @@ class Insta360InputDevice(InputDeviceBase):
 
     def is_ready(self):
         return self.state is not None
+
+    def _send_recording_control(self, message_type, expected_reply_type, timeout):
+        """Sends a {"type": message_type} control message to the bridge and
+        waits for its reply (see main.cc's recording-control callback and
+        this class's _read_bridge_loop). Returns the reply dict, or raises
+        TimeoutError if no reply arrives within timeout seconds."""
+        with self._recording_reply_lock:
+            self._latest_recording_reply = None
+        self._recording_reply_event.clear()
+
+        self._connection.sendall(encode_insta360_message({"type": message_type}))
+
+        if not self._recording_reply_event.wait(timeout=timeout):
+            raise TimeoutError(
+                f"[{self.__class__.__name__}] No '{expected_reply_type}' reply "
+                f"from Insta360 bridge '{self.name}' within {timeout}s."
+            )
+        with self._recording_reply_lock:
+            return self._latest_recording_reply
+
+    def start_recording(self, timeout=5.0):
+        """Starts on-device recording for offline SLAM post-processing of
+        the current episode (see main.cc's recording-control callback).
+        Returns True on success; prints and returns False on failure
+        (timeout, or the bridge reporting Camera::StartRecording() failed)
+        rather than raising, since a failed start here should not itself
+        abort teleoperation -- see TeleopBase's caller."""
+        try:
+            reply = self._send_recording_control(
+                "start_recording", "recording_started", timeout
+            )
+        except TimeoutError as e:
+            print(str(e))
+            return False
+        if not reply.get("ok", False):
+            print(
+                f"[{self.__class__.__name__}] Failed to start Insta360 "
+                f"'{self.name}' on-device recording: {reply.get('error')}"
+            )
+            return False
+        return True
+
+    def stop_recording(self, timeout=30.0):
+        """Stops on-device recording started by start_recording() and
+        downloads the resulting file from the camera (see main.cc's
+        recording-control callback -- this can take a while for a long
+        episode, hence the longer default timeout than start_recording()).
+        Returns the bridge's local filesystem path to the downloaded file
+        on success, or None on failure (same no-raise rationale as
+        start_recording())."""
+        try:
+            reply = self._send_recording_control(
+                "stop_recording", "recording_stopped", timeout
+            )
+        except TimeoutError as e:
+            print(str(e))
+            return None
+        if not reply.get("ok", False):
+            print(
+                f"[{self.__class__.__name__}] Failed to stop/download Insta360 "
+                f"'{self.name}' on-device recording: {reply.get('error')}"
+            )
+            return None
+        return reply["path"]
 
     def _gripper_limit(self, closed):
         """See ViveInputDevice._gripper_limit."""

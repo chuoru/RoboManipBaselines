@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import os
+import shutil
 import sys
 import time
 from abc import ABC
@@ -93,6 +94,22 @@ class TeleopPhase(PhaseBase):
         super().start()
 
         self.op.teleop_time_idx = 0
+        if self.op.insta360_slam_input_device is not None:
+            if self.op.insta360_slam_input_device.start_recording():
+                # DataKey.TIME is wall-clock time.time() relative to
+                # env.unwrapped.init_time (see RealEnvBase), but the SLAM
+                # trajectory misc/insta360_slam_pipeline/AddSlamPoseToRmb.py
+                # will later extract is relative to THIS recording's own
+                # start instead -- an entirely different clock origin.
+                # Save the wall-clock offset between the two now (while
+                # both are known) so that script can realign them; see
+                # save_data() below for where this gets attached to the
+                # episode.
+                self.op.insta360_slam_recording_offset_sec = (
+                    time.time() - self.op.env.unwrapped.init_time
+                )
+            else:
+                self.op.insta360_slam_recording_offset_sec = None
         print(
             f"[{self.op.__class__.__name__}] Press the 'n' key to finish teleoperation."
         )
@@ -111,6 +128,17 @@ class TeleopPhase(PhaseBase):
                 f"[{self.op.__class__.__name__}] Finish teleoperation. duration: {self.get_elapsed_duration():.1f} [s]"
             )
             self.op.episode_duration = self.get_elapsed_duration()
+            if self.op.insta360_slam_input_device is not None:
+                # Downloads the on-device recording now (can take a while
+                # -- see stop_recording()'s longer timeout) rather than in
+                # EndTeleopPhase/save_data(), so it happens exactly once per
+                # episode regardless of whether the episode is ultimately
+                # kept ('s') or discarded ('f') in EndTeleopPhase -- a
+                # discarded episode's download is just left at its /tmp
+                # path and never moved into a dataset directory.
+                self.op.insta360_slam_recording_path = (
+                    self.op.insta360_slam_input_device.stop_recording()
+                )
             return True
         else:
             return False
@@ -303,6 +331,27 @@ class TeleopBase(OperationDataMixin, ABC):
                 self.args.input_device, self.motion_manager, input_device_kwargs
             )
 
+        # See --record_insta360_slam. Looked up by class name (not
+        # isinstance, to avoid an import of teleop.Insta360InputDevice here
+        # for a device that is only ever actually present when
+        # --input_device insta360) rather than imported unconditionally,
+        # since this whole feature is opt-in and most setups have no
+        # Insta360 hardware at all.
+        self.insta360_slam_input_device = None
+        if self.args.record_insta360_slam:
+            for input_device in getattr(self, "input_device_list", []):
+                if type(input_device).__name__ == "Insta360InputDevice":
+                    self.insta360_slam_input_device = input_device
+                    break
+            if self.insta360_slam_input_device is None:
+                raise RuntimeError(
+                    f"[{self.__class__.__name__}] --record_insta360_slam was "
+                    "specified but no Insta360InputDevice is active -- pass "
+                    "--input_device insta360."
+                )
+        self.insta360_slam_recording_path = None
+        self.insta360_slam_recording_offset_sec = None
+
     def setup_args(self, parser=None, argv=None):
         if parser is None:
             parser = argparse.ArgumentParser(
@@ -354,6 +403,16 @@ class TeleopBase(OperationDataMixin, ABC):
             "--sync_before_record",
             action="store_true",
             help="whether to synchronize with input device before starting record",
+        )
+        parser.add_argument(
+            "--record_insta360_slam",
+            action="store_true",
+            help="when --input_device insta360, also start/stop the camera's "
+            "on-device recording for each episode (see "
+            "envs/real/insta360_bridge/main.cc's recording-control callback), "
+            "for later offline SLAM post-processing via "
+            "misc/insta360_slam_pipeline/. The downloaded recording is saved "
+            "alongside the episode's .rmb data on a successful save_data().",
         )
 
         parser.add_argument(
@@ -650,8 +709,43 @@ class TeleopBase(OperationDataMixin, ABC):
                 f"{self.demo_name}_world{self.data_manager.world_idx:0>1}_{self.data_manager.episode_idx:0>3}.{self.args.file_format}",
             )
         )
+        if self.insta360_slam_recording_offset_sec is not None:
+            # Read by misc/insta360_slam_pipeline/AddSlamPoseToRmb.py to
+            # realign the SLAM trajectory's own clock (relative to the
+            # on-device recording's start) with this episode's DataKey.TIME
+            # (relative to env.unwrapped.init_time) -- see TeleopPhase.start().
+            self.data_manager.meta_data["insta360_slam_recording_offset_sec"] = (
+                self.insta360_slam_recording_offset_sec
+            )
         self.data_manager.save_data(filename)
         print(f"[{self.__class__.__name__}] Save the data as {filename}")
+
+        if self.insta360_slam_recording_path is not None:
+            # For --file_format rmb, filename is a directory (see
+            # DataManager.dump_to_rmb) -- drop the raw on-device recording
+            # in as a sibling file inside it, for later offline SLAM via
+            # misc/insta360_slam_pipeline/ (see
+            # envs/real/insta360_bridge/main.cc's recording-control
+            # callback for how this file was produced/downloaded). For
+            # --file_format hdf5, filename is a plain file instead, so use
+            # a same-named sibling file next to it.
+            raw_recording_ext = os.path.splitext(self.insta360_slam_recording_path)[1]
+            if self.args.file_format == "rmb":
+                raw_recording_dest = os.path.join(
+                    filename, f"insta360_raw{raw_recording_ext}"
+                )
+            else:
+                raw_recording_dest = (
+                    os.path.splitext(filename)[0]
+                    + f"_insta360_raw{raw_recording_ext}"
+                )
+            shutil.move(self.insta360_slam_recording_path, raw_recording_dest)
+            print(
+                f"[{self.__class__.__name__}] Save the Insta360 on-device "
+                f"recording as {raw_recording_dest}"
+            )
+            self.insta360_slam_recording_path = None
+            self.insta360_slam_recording_offset_sec = None
 
     # Width (pixels) of each camera's rgb/depth panel in the teleop display window.
     # The window's total width is 2x this (rgb panel + depth panel side by side).

@@ -1,0 +1,129 @@
+%YAML:1.0
+
+# ORB-SLAM3 settings for an offline run on a raw Insta360 X3 single-fisheye
+# recording (VID_..._10_003.mp4, 2880x2880, ~29.97fps) with IMU extracted
+# from the paired lens's .insv file (VID_..._00_003.csv).
+#
+# Camera1.fx/fy/cx/cy/k1-k4 below are ROUGH-RESCALED from a real OpenCV
+# fisheye calibration done against envs/real/insta360_bridge's LIVE-STREAM
+# pipeline (back lens, 1920x1920 crop of the 3840x1920 dual-fisheye,
+# 26.6px RMS -- see that directory's Insta360_X4.yaml/README.md for the
+# calibration itself), scaled by 2880/1920=1.5 (k1-k4 are dimensionless in
+# theta and unchanged). This is NOT a real calibration of this on-device
+# recording pipeline specifically -- the live-stream path (SDK preview,
+# encoded+downscaled by the camera) and this on-device recording path
+# (camera's own .insv encoder) are genuinely different pipelines that may
+# not share identical effective focal length/distortion even for the same
+# physical lens; the "_00" vs "_10" lens in this recording is also not
+# confirmed to be the same physical lens as "back" in the live setup.
+# Verified consistent with the real image at least qualitatively: the
+# visible fisheye circle in the actual 2880x2880 frames closely matches
+# cx/cy (see Camera1.* below) and does not extend to the frame corners
+# (confirmed by inspecting an extracted frame). Treat this as a better
+# starting point than an all-zero-distortion/wrong-aspect-ratio-scaled
+# placeholder, not a trustworthy calibration -- a real calibration (checker-
+# board footage recorded on-device, converted via
+# robo_manip_baselines/misc/ConvertInsvToMp4AndImu.py, run through
+# envs/real/insta360_bridge/calibration/'s tooling adapted for this
+# resolution) is still needed before trusting scale/absolute pose/drift.
+#
+# Structure confirmed against ORB-SLAM3's own
+# Examples/Monocular-Inertial/TUM-VI.yaml (v1.0 schema, KannalaBrandt8 + IMU).
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+# Insta360 X3's raw .insv-derived mp4 is an un-stitched single fisheye lens
+# image (2880x2880, confirmed via ffprobe), so the fisheye (Kannala-Brandt)
+# model is used rather than "PinHole".
+Camera.type: "KannalaBrandt8"
+
+Camera1.fx: 1468.8220
+Camera1.fy: 1480.0992
+Camera1.cx: 1440.5770
+Camera1.cy: 1440.7901
+
+# Rescaled from the live-stream calibration's k1-k4 (dimensionless in
+# theta, no rescaling needed). That calibration's fit is only physically
+# valid (monotonic distortion curve) up to ~44 degrees incidence --
+# mono_inertial_video.cc applies a circular safety mask at the equivalent
+# rescaled radius before TrackMonocular to stay within that range (same
+# fix as envs/real/insta360_bridge/main.cc needed against real hardware to
+# avoid a segfault in libORB_SLAM3.so past that angle).
+Camera1.k1: -0.607553
+Camera1.k2: 2.022865
+Camera1.k3: -0.985089
+Camera1.k4: -1.216078
+
+# Camera resolution -- matches the actual VID_20260917_234930_10_003.mp4
+# (confirmed via ffprobe: 2880x2880).
+Camera.width: 2880
+Camera.height: 2880
+
+# Measured fps was ~29.97 (30000/1001); nearest documented nominal value used.
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB). cv::VideoCapture decodes to BGR.
+Camera.RGB: 0
+
+# PLACEHOLDER transformation from the IMU's body frame to the camera frame.
+# No real camera-IMU extrinsic calibration exists for this unit. Identity
+# rotation + zero translation is almost certainly wrong; treat any tracking
+# result before this is calibrated as unreliable. Carried over verbatim from
+# envs/real/insta360_bridge/Insta360_X4.yaml.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          0.0, 0.0, 0.0, 1.0]
+
+# PLACEHOLDER IMU noise parameters (VINS-Mono generic defaults, same as
+# Insta360_X4.yaml/TUM-VI.yaml -- NOT measured against the Insta360 X3's
+# actual IMU).
+IMU.InsertKFsWhenLost: 0
+IMU.NoiseGyro: 1e-3   # rad/s^0.5
+IMU.NoiseAcc: 1e-2    # m/s^1.5
+IMU.GyroWalk: 1e-6    # rad/s^1.5
+IMU.AccWalk: 1e-4     # m/s^2.5
+
+# Matches the *actual* sample spacing measured in the exported CSV (exactly
+# 1.000ms between consecutive gyro-only or accel-only samples across the
+# whole file, i.e. 1000Hz), which is the rate the data is genuinely fed in
+# at here -- not the sensor's nominal native rate (a placeholder comment
+# elsewhere in this repo notes the Insta360 IMU is nominally ~200Hz; the
+# 1000Hz in the CSV is telemetry_parser's normalized/interpolated output).
+IMU.Frequency: 1000.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+ORBextractor.nFeatures: 1250
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters (only used when mono_inertial_video is run with --viewer)
+#--------------------------------------------------------------------------------------------
+# Scales the "Current Frame" display window relative to the native
+# 2880x2880 video -- without this it defaults to 1.0 (full native size),
+# which verified against real hardware makes an unusably large window.
+# Display-only, does not affect tracking resolution/quality.
+Viewer.imageViewScale: 0.25
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

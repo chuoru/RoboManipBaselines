@@ -54,4 +54,8 @@
 	url = https://github.com/linker-bot/linkerhand-python-sdk
 [submodule "third_party/ORB_SLAM3"]
 	path = third_party/ORB_SLAM3
-	url = https://github.com/UZ-SLAMLab/ORB_SLAM3.git
+	url = https://github.com/cheng-chi/ORB_SLAM3.git
+	branch = master
+[submodule "third_party/OpenImuCameraCalibrator"]
+	path = third_party/OpenImuCameraCalibrator
+	url = https://github.com/urbste/OpenImuCameraCalibrator.git

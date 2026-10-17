@@ -861,6 +861,74 @@ int main(int argc, char** argv) {
   int record_frame_index = 0;
 
   BridgeServer server(socket_path);
+
+  // Per-episode on-device recording control (start_recording/
+  // stop_recording), for offline SLAM post-processing of teleop episodes
+  // -- see misc/insta360_slam_pipeline/ and
+  // envs/real/insta360_bridge/orb_slam3_hardware_fixes/README.md's Phase 3.
+  // Distinct from --record above: that path re-encodes the already
+  // cropped/masked/resized SLAM-input frames (useful for calibration,
+  // since it matches exactly what SLAM sees); this path uses the
+  // CameraSDK's own on-device recording (StartRecording/StopRecording),
+  // giving full native-resolution, unprocessed footage -- better for
+  // offline SLAM accuracy, consumed via misc/ConvertInsvToMp4AndImu.py and
+  // ORB_SLAM3's mono_inertial_video using Insta360X3_2880.yaml (or an
+  // equivalent calibration for whatever on-device resolution this camera's
+  // current video-capture settings produce).
+  //
+  // UNVERIFIED ON REAL HARDWARE: whether this SDK/camera supports
+  // concurrent live-streaming (for the bridge's own frame/pose broadcast)
+  // and on-device recording. If StartRecording() fails or produces
+  // corrupt/empty on-device footage while live-streaming is active, that
+  // needs to be confirmed and this comment updated accordingly.
+  std::mutex recording_mutex;
+  server.SetMessageCallback([&camera, &recording_mutex, &server](
+                                 const std::string& header_json) {
+    std::string type;
+    if (!ExtractMessageType(header_json, &type)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(recording_mutex);
+    if (type == "start_recording") {
+      bool ok = camera->StartRecording();
+      std::cout << "[insta360_bridge] StartRecording() -> "
+                << (ok ? "ok" : "FAILED") << std::endl;
+      server.Broadcast(EncodeRecordingStartedMessage(
+          ok, ok ? "" : "Camera::StartRecording() returned false"));
+    } else if (type == "stop_recording") {
+      ins_camera::MediaUrl media_url = camera->StopRecording();
+      if (media_url.Empty() || !media_url.IsSingleOrigin()) {
+        std::cerr << "[insta360_bridge] StopRecording() returned no "
+                      "single-origin file."
+                   << std::endl;
+        server.Broadcast(EncodeRecordingStoppedMessage(
+            false, "StopRecording() returned no single-origin file"));
+        return;
+      }
+      const std::string remote_path = media_url.GetSingleOrigin();
+      // Local filename derived from the remote one (keeps the camera's own
+      // extension, e.g. .insv) plus a wall-clock-based unique prefix so
+      // concurrent/sequential episodes never collide.
+      const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+      size_t slash_pos = remote_path.find_last_of('/');
+      const std::string remote_basename =
+          slash_pos == std::string::npos ? remote_path
+                                          : remote_path.substr(slash_pos + 1);
+      const std::string local_path =
+          "/tmp/insta360_recording_" + std::to_string(now_ns) + "_" +
+          remote_basename;
+      bool ok = camera->DownloadCameraFile(remote_path, local_path);
+      std::cout << "[insta360_bridge] StopRecording() -> " << remote_path
+                << ", DownloadCameraFile() -> "
+                << (ok ? local_path : "FAILED") << std::endl;
+      server.Broadcast(EncodeRecordingStoppedMessage(
+          ok, ok ? local_path
+                 : "DownloadCameraFile() failed for " + remote_path));
+    }
+  });
+
   server.Start();
   std::cout << "[insta360_bridge] Serving on " << socket_path << std::endl;
   if (!record_prefix.empty()) {
