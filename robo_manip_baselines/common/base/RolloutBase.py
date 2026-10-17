@@ -3,6 +3,7 @@ import csv
 import datetime
 import os
 import pickle
+import signal
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -193,6 +194,7 @@ class EndRolloutPhase(PhaseBase):
             if self.op.args.save_rollout:
                 filename = self.op.get_data_filename()
                 self.op.data_manager.save_data(filename)
+                self.op.episode_saved = True
                 print(f"[{self.op.__class__.__name__}] Save the data as {filename}")
             else:
                 self.op.data_manager.episode_idx += 1
@@ -665,7 +667,39 @@ class RolloutBase(OperationDataMixin, ABC):
         self.reset_flag = True
         self.quit_flag = False
         self.inference_duration_list = []
+        self.episode_saved = False
 
+        try:
+            self.main_loop()
+        except KeyboardInterrupt:
+            # Ctrl+C is how an operator stops a rollout that moves
+            # dangerously -- exactly the episodes worth keeping for analysis.
+            # Save what was recorded (if not saved yet), then fall through to
+            # the normal shutdown below so the robot and cameras are closed
+            # properly instead of the process dying mid-loop.
+            # Operators tend to hit Ctrl+C repeatedly when the arm moves
+            # dangerously. Further presses must not abort the save or skip
+            # closing the robot, so ignore them from here on (Ctrl+\ still
+            # force-quits if the shutdown itself ever hangs).
+            signal.signal(
+                signal.SIGINT,
+                lambda *_: print(
+                    f"[{self.__class__.__name__}] Saving and shutting down, please wait..."
+                ),
+            )
+            print(f"\n[{self.__class__.__name__}] Interrupted by Ctrl+C.")
+            if (
+                self.args.save_rollout
+                and not self.episode_saved
+                and len(self.data_manager.all_data_seq.get(DataKey.TIME, [])) > 0
+            ):
+                filename = self.get_data_filename(suffix="_interrupted")
+                self.data_manager.save_data(filename)
+                print(f"[{self.__class__.__name__}] Save the interrupted rollout as {filename}")
+
+        self.finalize()
+
+    def main_loop(self):
         while True:
             if self.reset_flag:
                 self.reset()
@@ -707,6 +741,7 @@ class RolloutBase(OperationDataMixin, ABC):
             if self.quit_flag:
                 break
 
+    def finalize(self):
         if self.args.result_filename is not None:
             print(
                 f"[{self.__class__.__name__}] Save the rollout results: {self.args.result_filename}"
@@ -747,6 +782,7 @@ class RolloutBase(OperationDataMixin, ABC):
 
         # Reset data manager
         self.data_manager.reset()
+        self.episode_saved = False
 
         # Reset environment
         self.env.unwrapped.world_random_scale = self.args.world_random_scale
@@ -927,6 +963,7 @@ class RolloutBase(OperationDataMixin, ABC):
         DataKey.MEASURED_EEF_POSE: ["tx", "ty", "tz", "qw", "qx", "qy", "qz"],
         DataKey.COMMAND_GRIPPER_JOINT_POS: ["pos"],
         DataKey.MEASURED_GRIPPER_JOINT_POS: ["pos"],
+        DataKey.COMMAND_EEF_POSE_REL: ["dx", "dy", "dz", "rx", "ry", "rz"],
     }
 
     def _policy_command_log_columns(self, key, dim):
@@ -939,11 +976,19 @@ class RolloutBase(OperationDataMixin, ABC):
         if len(command_by_key) == 0:
             return
 
+        # Log the measured counterpart of each command key. Relative (*_rel)
+        # command keys have no measured counterpart the motion manager can
+        # provide, so log the absolute measured value instead (which is also
+        # what is needed to reconstruct the actual trajectory).
+        measured_keys = []
+        for key in command_by_key:
+            measured_key = DataKey.get_measured_key(key)
+            if measured_key.endswith("_rel"):
+                measured_key = DataKey.get_abs_key(measured_key)
+            if measured_key not in measured_keys:
+                measured_keys.append(measured_key)
         measured_by_key = {
-            key.replace("command_", "measured_", 1): self.get_measured_data_for_policy(
-                key.replace("command_", "measured_", 1)
-            )
-            for key in command_by_key
+            key: self.get_measured_data_for_policy(key) for key in measured_keys
         }
 
         if self._policy_command_log_writer is None:
@@ -975,7 +1020,7 @@ class RolloutBase(OperationDataMixin, ABC):
         self._policy_command_log_writer.writerow(row)
         self._policy_command_log_file.flush()
 
-    def get_data_filename(self):
+    def get_data_filename(self, suffix=""):
         filename = os.path.normpath(
             os.path.join(
                 os.path.dirname(__file__),
@@ -983,7 +1028,7 @@ class RolloutBase(OperationDataMixin, ABC):
                 "..",
                 "dataset",
                 f"Rollout{self.policy_name}_{self.demo_name}_{self.datetime_now:%Y%m%d_%H%M%S}",
-                f"{self.demo_name}_world{self.data_manager.world_idx:0>1}_{self.data_manager.episode_idx:0>3}.rmb",
+                f"{self.demo_name}_world{self.data_manager.world_idx:0>1}_{self.data_manager.episode_idx:0>3}{suffix}.rmb",
             )
         )
         return filename

@@ -69,6 +69,10 @@ class OperationRealFairino5Demo:
         # consecutive commands actually sent to the arm -- see
         # RealFairino5EnvBase.max_joint_pos_delta_deg. None disables it.
         max_joint_pos_delta_deg=None,
+        # tool_do gripper close threshold / reported closed percent -- see
+        # RealFairino5EnvBase.
+        tool_do_close_threshold=50.0,
+        tool_do_closed_percent=100.0,
         # EMA smoothing applied to the commanded joint position before it is
         # sent (see RealFairino5EnvBase.command_smoothing_alpha). Lower =
         # smoother but laggier; 1.0 = no filtering.
@@ -92,6 +96,8 @@ class OperationRealFairino5Demo:
         self.joint_vel_limit_scale = joint_vel_limit_scale
         self.time_scale = time_scale
         self.max_joint_pos_delta_deg = max_joint_pos_delta_deg
+        self.tool_do_close_threshold = tool_do_close_threshold
+        self.tool_do_closed_percent = tool_do_closed_percent
         self.command_smoothing_alpha = command_smoothing_alpha
         super().__init__()
 
@@ -124,6 +130,8 @@ class OperationRealFairino5Demo:
             joint_vel_limit_scale=self.joint_vel_limit_scale,
             time_scale=time_scale,
             max_joint_pos_delta_deg=self.max_joint_pos_delta_deg,
+            tool_do_close_threshold=self.tool_do_close_threshold,
+            tool_do_closed_percent=self.tool_do_closed_percent,
             command_smoothing_alpha=self.command_smoothing_alpha,
         )
 

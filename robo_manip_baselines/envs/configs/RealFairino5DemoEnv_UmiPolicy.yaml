@@ -19,14 +19,20 @@ robot_ip: "192.168.57.2"
 #   python ./third_party/pyorbbecsdk/examples/enumerate.py
 pointcloud_camera_ids:
   hand: "CV2L3600005M"
-# Match the hand-camera settings the training demos were recorded with (see
-# envs/configs/RealUMIDemo.yaml): 1280x800 color profile and fixed
-# exposure/gain. Without these the camera falls back to its default profile
-# (848x530 resized to 640x480 -- different aspect ratio/FOV) with
-# auto-exposure, i.e. a different observation than the policy was trained on.
+# Match the training demos' 1280x800 color profile (see
+# envs/configs/RealUMIDemo.yaml). Without it the camera falls back to its
+# default profile (848x530 resized to 640x480 -- different aspect ratio/FOV).
 pointcloud_camera_color_resolution: [1280, 800, 10]
-pointcloud_camera_color_exposure: 20
-pointcloud_camera_color_gain: 40
+# Auto-exposure, NOT the demos' fixed 20/40. What has to match training is
+# the image BRIGHTNESS, and the robot cell is much darker than where the
+# demos were recorded: with fixed 20/40, rollout frames averaged ~57/255 vs.
+# 124-142 in the training data (2026-10-17), and policies failed. The view
+# also swings between the dark cell and bright windows as the arm moves, so
+# no single fixed value fits; auto-exposure measured ~120 here. The demos
+# needed a short fixed exposure only to keep the UMI finger AprilTags
+# blur-free -- nothing is read from markers on the robot. If you go back to
+# fixed values, re-check brightness against the training data first.
+pointcloud_camera_color_exposure: auto
 gripper_hand_type: "right"
 gripper_modbus_port: "/dev/ttyUSB0"
 
@@ -91,3 +97,10 @@ max_joint_pos_delta_deg: 2.0
 # spikes that saturate max_joint_pos_delta_deg), not something a low-pass on
 # the joint command can remove. Raise time_scale to make it gentler.
 command_smoothing_alpha: 0.3
+
+# Gripper (binary IAI, tool DO) matched to the UMI training data, where the
+# marker-measured percent-closed while holding the cup is ~47-70% (median
+# ~60%) and ~0-10% when open: close at >=30% and report "closed" as 60%.
+# Matters most for policies whose only state input is the gripper.
+tool_do_close_threshold: 30.0
+tool_do_closed_percent: 60.0

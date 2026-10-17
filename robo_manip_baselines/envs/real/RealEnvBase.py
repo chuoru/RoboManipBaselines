@@ -227,8 +227,11 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         supported color profiles); it is not a request that gets upscaled
         artificially.
 
-        color_exposure/color_gain: None (default) leaves auto-exposure on,
-        as before. Pass both (e.g. color_exposure=40, color_gain=150 --
+        color_exposure/color_gain: None (default) does not touch the
+        camera's exposure mode (whatever the camera is currently set to --
+        note a manual setting persists across processes until power-cycled).
+        color_exposure="auto" explicitly turns auto-exposure on (color_gain
+        is then ignored). Pass both (e.g. color_exposure=40, color_gain=150 --
         confirmed to still produce a usable, sharp image on this rig's
         Orbbec Gemini 305, vs. its auto-exposure default of exposure=100
         gain=16) to force a short, FIXED exposure time instead. Also added
@@ -359,7 +362,14 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
 
         color_exposure = getattr(self, "_femtobolt_color_exposure", None)
         color_gain = getattr(self, "_femtobolt_color_gain", None)
-        if color_exposure is not None or color_gain is not None:
+        if color_exposure == "auto":
+            from pyorbbecsdk import OBPropertyID
+
+            # Explicitly re-enable auto-exposure. Leaving the exposure unset
+            # is NOT enough: the camera keeps the manual mode a previous
+            # process (or another config) left it in until it is power-cycled.
+            device.set_bool_property(OBPropertyID.OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, True)
+        elif color_exposure is not None or color_gain is not None:
             from pyorbbecsdk import OBPropertyID
 
             # Manual exposure requires auto-exposure off first, or

@@ -111,6 +111,15 @@ class RealFairino5EnvBase(RealEnvBase):
         # holds regardless of what they do. Use it to guarantee the arm can
         # never lurch far enough in one command to damage what it is holding.
         max_joint_pos_delta_deg=None,
+        # tool_do gripper only (binary, no width sensor). The percent-closed
+        # at/above which a command closes it, and the percent-closed reported
+        # as the measured state while it is closed. Defaults keep the old
+        # 50 / 100 behaviour. A policy trained on UMI marker-measured widths
+        # (holding the cup reads ~47-70%, median ~60%) needs these matched to
+        # its data: 100% is a state it never saw, and 50% would miss grasp
+        # commands in the high 40s.
+        tool_do_close_threshold=50.0,
+        tool_do_closed_percent=100.0,
         pointcloud_camera_ids=None,
         # Orbbec color profile / fixed exposure, same meaning as in
         # RealUMIEnvBase (see RealEnvBase.setup_femtobolt). A policy trained
@@ -129,6 +138,8 @@ class RealFairino5EnvBase(RealEnvBase):
         self.servoj_filter_t = servoj_filter_t
         self.servoj_gain = servoj_gain
         self.max_joint_pos_delta_deg = max_joint_pos_delta_deg
+        self.tool_do_close_threshold = tool_do_close_threshold
+        self.tool_do_closed_percent = tool_do_closed_percent
         # Previously transmitted arm joint command [deg], the anchor for
         # max_joint_pos_delta_deg. None = nothing sent since the last reset or
         # out-of-stream move, so the next command anchors on the measurement.
@@ -361,7 +372,7 @@ class RealFairino5EnvBase(RealEnvBase):
             # DO1=0, which does nothing. That is exactly what a UMI replay
             # showed -- a demo whose commands crossed the close threshold for
             # 12.8 continuous seconds never actuated the gripper.
-            closing = gripper_percent_closed >= 50.0
+            closing = gripper_percent_closed >= self.tool_do_close_threshold
             if closing == self._last_gripper_closing:
                 # SetToolDO is a blocking XML-RPC call; only send on a state
                 # change, not every control-loop tick (unlike LinkerHand's
@@ -750,7 +761,7 @@ class RealFairino5EnvBase(RealEnvBase):
                     gripper_percent_closed = self._last_gripper_percent_closed
                 else:
                     gripper_percent_closed = (
-                        100.0 if self._last_gripper_closing else 0.0
+                        self.tool_do_closed_percent if self._last_gripper_closing else 0.0
                     )
                     self._last_gripper_percent_closed = gripper_percent_closed
             gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
