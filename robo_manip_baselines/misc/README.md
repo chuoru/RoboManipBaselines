@@ -65,3 +65,10 @@ Convert every `.insv` file in a directory to a `.mp4` video (stream copy, no re-
 ```console
 $ python ./ConvertInsvToMp4AndImu.py --dataset_dir <insv_dir> [--output_dir <output_dir>] [--overwrite]
 ```
+
+### Plot/visualize IMU CSV data
+Plot gyro/accelerometer time series from an IMU CSV (as produced by `ConvertInsvToMp4AndImu.py` or the `insta360_bridge`'s `--record` mode) to visually sanity-check the readings: gyro/accel vs. time, accelerometer magnitude against the ~9.81 m/s^2 gravity reference, and inter-sample timing to catch dropped samples or rate glitches.
+```console
+$ python ./PlotInsta360Imu.py <imu_csv_path> [--plot_output <plot_output.png>] [--show]
+```
+Pass multiple CSV paths to plot several files in one run (one PNG per file, auto-named `<csv_path>_imu_plot.png`).
