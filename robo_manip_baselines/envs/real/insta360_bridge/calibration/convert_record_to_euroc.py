@@ -4,7 +4,7 @@ folder layout Basalt's basalt_calibrate/basalt_calibrate_imu expect with
 --dataset-type euroc, for camera-IMU extrinsic (T_b_c1) calibration.
 
 Usage: python3 convert_record_to_euroc.py <record_prefix> <out_dir>
-  <record_prefix>.avi                    -- 640x640 BGR frames (MJPG/AVI)
+  <record_prefix>.avi                    -- 800x800 BGR frames (MJPG/AVI)
   <record_prefix>_frame_timestamps.csv   -- frame_index,timestamp_ms
   <record_prefix>.csv                    -- long-format IMU (see below)
 Writes <out_dir>/mav0/{cam0,imu0}/...

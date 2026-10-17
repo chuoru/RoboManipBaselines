@@ -1,5 +1,6 @@
 """Build the beginner-friendly PDF write-up of the UMI->FR5 replay fix."""
 
+import os
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -20,8 +21,11 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-OUT = "/tmp/claude-1000/-home-sandbox-Work-RoboManipBaselines/08bf81df-4778-439c-a023-940e39849f8b/scratchpad"
-PDF = "/home/sandbox/Work/RoboManipBaselines/doc/umi_replay_fix_explained.pdf"
+# Scratch dir holding the downloaded fonts and the generated fig_*.png
+# inputs. Was an absolute path into a previous machine's session temp dir.
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build")
+os.makedirs(OUT, exist_ok=True)
+PDF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "umi_replay_fix_explained.pdf")
 
 # Noto Sans CJK ships only as .ttc collections with PostScript/CFF outlines,
 # which reportlab cannot embed, and the one plain-TrueType Japanese font on

@@ -23,15 +23,21 @@ rendered sheet) before wiring in here.
 
 Press 'q' in the preview window to stop.
 """
+import os
 import socket
 import sys
 
 import cv2
 
-sys.path.insert(0, "/home/sandbox/Work/RoboManipBaselines/robo_manip_baselines/common/utils")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# common/utils is four levels up from this calibration/ directory.
+sys.path.insert(
+    0, os.path.normpath(os.path.join(_HERE, "..", "..", "..", "..", "common", "utils"))
+)
 from Insta360Protocol import read_message
 
-sys.path.insert(0, "/home/sandbox/Work/RoboManipBaselines/robo_manip_baselines/envs/real/insta360_bridge/calibration")
+# aprilgrid_2cell_detector lives next to this script.
+sys.path.insert(0, _HERE)
 import aprilgrid_2cell_detector as apriltag_detector
 
 sock_path = sys.argv[1]

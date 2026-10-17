@@ -153,6 +153,37 @@ $ pip install -e third_party/DynamixelSDK/python
 ## Installation of each sensor device
 Complete [the common installation](#common-installation) first.
 
+### [Insta360](https://www.insta360.com) X3/X4 bridge (ORB-SLAM3)
+
+`insta360_bridge` streams an Insta360 camera over USB into ORB-SLAM3
+(Monocular-Inertial) and publishes camera frames plus the estimated 6-DoF pose
+to Python over a Unix domain socket. It is used both as a `rgb_cameras` source
+and as a teleoperation input device (replacing the HTC Vive Tracker on the UMI
+rig).
+
+Unlike the other sensors here, it does **not** use the common pip installation
+-- it is a C++ process with its own Docker image, because it needs ORB-SLAM3,
+Pangolin and Basalt rather than Python packages:
+
+```console
+# Go to the top directory of this repository
+$ newgrp docker                 # if your login session predates `usermod -aG docker`
+$ xhost +local:docker
+$ mkdir -p /tmp/insta360
+$ docker compose -f docker-compose.insta360.yaml build
+$ docker compose -f docker-compose.insta360.yaml run --rm insta360_bridge bash
+```
+
+The proprietary Insta360 CameraSDK is not redistributable and is not included:
+apply at <https://www.insta360.com/sdk/apply> and unpack it to
+`third_party/insta360_sdk/` (must contain `include/camera/` and `lib/`), from
+where the compose file bind-mounts it.
+
+See [`robo_manip_baselines/envs/real/insta360_bridge/README.md`](../robo_manip_baselines/envs/real/insta360_bridge/README.md)
+for the build, the required camera-side settings (dual-lens 360 mode, 30fps,
+Android USB mode), and the camera/IMU calibration procedure.
+
+
 ### [Femto Bolt](https://www.orbbec.com/products/tof-camera/femto-bolt/)
 Install dependent libraries including [pyorbbecsdk](https://github.com/orbbec/pyorbbecsdk):
 ```console

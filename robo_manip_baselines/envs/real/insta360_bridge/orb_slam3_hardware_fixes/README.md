@@ -99,3 +99,16 @@ that build:
   cleanly against this fork in this environment. **None of this has been
   tested against real hardware** (this sandbox has no Insta360 camera
   attached) — do that before trusting it over the previous build.
+- **`-march=native` ABI mismatch, found via `feat/insta360-docker-slam-fixes`
+  (merged into this branch)**: ORB_SLAM3/DBoW2/g2o's CMakeLists.txt all add
+  `-march=native` in Release by default, which that branch found (on real
+  hardware, independently of this fork swap) raises Eigen's alignment
+  requirement from 16 to 32 bytes (AVX) — the vendored 2011-era g2o does not
+  honour this consistently, causing a reproducible `double free or
+  corruption (out)` inside `g2o::HyperGraph::clear()` right after the first
+  global bundle adjustment. Stripped `-march=native` from all three
+  CMakeLists.txt here too (`sed -i 's/ -march=native//g'`) and did a full
+  clean rebuild (DBoW2 → g2o → main lib+examples → insta360_bridge) to
+  match; `insta360_bridge/CMakeLists.txt`'s new `INSTA360_BRIDGE_ARCH_FLAGS`
+  cache variable (also from that branch) must stay consistent with whatever
+  ORB_SLAM3 was actually built with if you ever reintroduce arch flags.

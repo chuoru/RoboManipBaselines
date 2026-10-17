@@ -1,0 +1,79 @@
+# Insta360 X3/X4 + ORB-SLAM3 bridge. Use ALONGSIDE (not instead of)
+# docker-compose.linux.yaml, which remains the ML/training image.
+#
+#   docker compose -f docker-compose.insta360.yaml build
+#   docker compose -f docker-compose.insta360.yaml run --rm insta360_bridge bash
+#
+# HOST PREREQUISITES (see envs/real/insta360_bridge/README.md):
+#   1. `newgrp docker` (or log out/in once) -- a login session that predates the
+#      `usermod -aG docker` cannot reach the socket even though the group
+#      membership is already correct. `sg docker -c "<cmd>"` works per-command.
+#   2. `xhost +local:docker`     (revoke with `xhost -local:docker`)
+#   3. `mkdir -p /tmp/insta360`
+#
+# Deliberately NOT required: the NVIDIA Container Toolkit. Nothing in this image
+# uses CUDA, and this host's Xorg runs modesetting/glamor on the Intel iGPU, so
+# the /dev/dri passthrough below yields real hardware GL (verified: "direct
+# rendering: Yes", Mesa Intel (RPL-S), OpenGL 4.6). The toolkit is still needed
+# by docker-compose.linux.yaml's training image.
+
+services:
+  insta360_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.insta360
+      target: calib          # `slam` for the lean, Basalt-free runtime
+    image: robo_manip_baselines_insta360:latest
+    container_name: insta360_bridge
+    stdin_open: true
+    tty: true
+    working_dir: /workspace/RoboManipBaselines/robo_manip_baselines/envs/real/insta360_bridge
+    environment:
+      - DISPLAY=${DISPLAY}
+      - PYTHONPATH=/workspace/RoboManipBaselines
+      - INSTA360_SDK_DIR=/workspace/RoboManipBaselines/third_party/insta360_sdk
+      - ORB_SLAM3_DIR=/opt/ORB_SLAM3
+      - ORB_VOCAB=/opt/ORB_SLAM3/Vocabulary/ORBvoc.txt
+      # Uncomment ONLY if GL misbehaves. llvmpipe is perfectly adequate for
+      # ORB-SLAM3's sparse map and Basalt's plotter. Not needed on this host.
+      # - LIBGL_ALWAYS_SOFTWARE=1
+    volumes:
+      - .:/workspace/RoboManipBaselines
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Unix-socket rendezvous shared with the host and the ML/teleop container.
+      # Bind the DIRECTORY, not the socket file -- the socket does not exist
+      # until the bridge creates it, and Docker would otherwise materialise it
+      # as an empty directory.
+      - /tmp/insta360:/tmp/insta360:rw
+      # Bind the /dev/bus/usb DIRECTORY (not individual nodes): the camera's node
+      # number changes when it is replugged or switched into Android USB mode,
+      # and a directory bind tracks that live.
+      - /dev/bus/usb:/dev/bus/usb
+      # libusb's udev backend reads this for device enumeration.
+      - /run/udev:/run/udev:ro
+      # Basalt caches AprilGrid corner detections here -- persisting it means
+      # basalt_calibrate_imu reuses basalt_calibrate's detect_corners pass
+      # (minutes, on a multi-thousand-frame recording) instead of redoing it.
+      - insta360_cache:/root/.cache
+    # USB is character-device major 189 (verified: /dev/bus/usb/001/001 is
+    # `crw-rw-r-- root root 189, 0`). Grants rw+mknod on all USB nodes WITHOUT
+    # --privileged. If CameraSDK's DeviceDiscovery still finds nothing, escalate
+    # in this order, stopping at the first that works:
+    #   1. as-is
+    #   2. add   - /sys/bus/usb:/sys/bus/usb:ro   to volumes
+    #   3. privileged: true   (replaces device_cgroup_rules + devices)
+    #   4. privileged: true + network_mode: host + pid: host
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+    # Intel iGPU render node for DRI3 direct rendering (card1/renderD128 is i915;
+    # card2/renderD129 is the NVIDIA card, unused here).
+    devices:
+      - /dev/dri:/dev/dri
+    # X11 MIT-SHM between the container and the host's Xorg. Without this,
+    # cv2.imshow and Pangolin fall back to slow non-shared-memory transport and
+    # frequently log "Shared memory error".
+    ipc: host
+    shm_size: '2gb'
+
+volumes:
+  insta360_cache:

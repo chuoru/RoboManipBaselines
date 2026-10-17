@@ -20,9 +20,12 @@ robo_manip_baselines/Log
 
 # Proprietary Insta360 CameraSDK (not redistributable, see envs/real/insta360_bridge/README.md)
 /third_party/insta360_sdk/
-/robo_manip_baselines/envs/real/insta360_bridge/build/
+/robo_manip_baselines/envs/real/insta360_bridge/build*/
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/checkerboard_a3.png
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/checkerboard_a3.pdf
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/aprilgrid_a4.png
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/aprilgrid_a4.pdf
-robo_manip_baselines/envs/real/insta360_bridge/build_mono/*
+/robo_manip_baselines/envs/real/insta360_bridge/build_mono/
+/robo_manip_baselines/envs/real/insta360_bridge/calibration/recordings/
+/robo_manip_baselines/envs/real/insta360_bridge/calibration/euroc_*/
+/robo_manip_baselines/envs/real/insta360_bridge/calibration/results/
