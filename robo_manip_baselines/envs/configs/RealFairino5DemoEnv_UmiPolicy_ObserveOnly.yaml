@@ -19,6 +19,14 @@ robot_ip: "192.168.57.2"
 #   python ./third_party/pyorbbecsdk/examples/enumerate.py
 pointcloud_camera_ids:
   hand: "CV2L3600005M"
+# Match the hand-camera settings the training demos were recorded with (see
+# envs/configs/RealUMIDemo.yaml): 1280x800 color profile and fixed
+# exposure/gain. Without these the camera falls back to its default profile
+# (848x530 resized to 640x480 -- different aspect ratio/FOV) with
+# auto-exposure, i.e. a different observation than the policy was trained on.
+pointcloud_camera_color_resolution: [1280, 800, 10]
+pointcloud_camera_color_exposure: 20
+pointcloud_camera_color_gain: 40
 gripper_hand_type: "right"
 gripper_modbus_port: "/dev/ttyUSB0"
 

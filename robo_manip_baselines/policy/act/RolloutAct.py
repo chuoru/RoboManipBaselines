@@ -113,12 +113,18 @@ class RolloutAct(RolloutBase):
         self.plot_action(self.ax[0, len(self.camera_names)])
 
         # Draw attention images
-        attention_shape = (15, 20 * len(self.camera_names))
+        # The image tokens are the backbone's feature map (stride 32), with the
+        # cameras concatenated along the width: 15 x 20 per camera for 640x480
+        # input, 25 x 40 for 1280x800. Derive it from the actual image size
+        # instead of hard-coding the 640x480 case.
+        image_height = self.info["rgb_images"][self.camera_names[0]].shape[0]
+        feature_height = -(-image_height // 32)
         for layer_idx, layer in enumerate(self.policy.model.transformer.encoder.layers):
             if layer.self_attn.correlation_mat is None:
                 continue
+            attention = layer.self_attn.correlation_mat[2:, 1]
             self.ax[1, layer_idx].imshow(
-                layer.self_attn.correlation_mat[2:, 1].reshape(attention_shape)
+                attention.reshape(feature_height, attention.size // feature_height)
             )
             self.ax[1, layer_idx].set_title(
                 f"attention image ({layer_idx})", fontsize=20

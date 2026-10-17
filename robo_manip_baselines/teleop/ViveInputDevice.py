@@ -353,7 +353,8 @@ class ViveInputDevice(InputDeviceBase):
                         @ self.vive_to_eef_translation
                     )
                     print(
-                        f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}'."
+                        f"[{self.__class__.__name__}] Teleoperation enabled for Vive '{self.name}' "
+                        "(recording can start now)."
                     )
 
     def _read_survive(self):
@@ -404,7 +405,14 @@ class ViveInputDevice(InputDeviceBase):
             self.has_announced_ready = True
 
     def is_ready(self):
-        return self.state is not None
+        # Ready only once teleop is ENABLED (pose settled for POSE_SETTLE_TIME
+        # and MIN_ANCHOR_DELAY elapsed), not merely tracked. Otherwise
+        # StandbyTeleopPhase lets recording start while the anchor is still
+        # settling: every episode then began with ~8-9 s of frozen identity
+        # pose/command while the camera image was already moving -- 30-46% of
+        # each RealUMIDemo episode -- and policies trained on it learned to
+        # stand still at the start.
+        return self.state is not None and self.enabled_teleop
 
     def _gripper_limit(self, closed):
         """Fully-closed / fully-open gripper command, for gripper_toggle mode.

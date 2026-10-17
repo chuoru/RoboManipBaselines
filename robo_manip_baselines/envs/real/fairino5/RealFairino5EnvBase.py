@@ -112,6 +112,12 @@ class RealFairino5EnvBase(RealEnvBase):
         # never lurch far enough in one command to damage what it is holding.
         max_joint_pos_delta_deg=None,
         pointcloud_camera_ids=None,
+        # Orbbec color profile / fixed exposure, same meaning as in
+        # RealUMIEnvBase (see RealEnvBase.setup_femtobolt). A policy trained
+        # on UMI demos must see the camera configured as during recording.
+        pointcloud_camera_color_resolution=None,
+        pointcloud_camera_color_exposure=None,
+        pointcloud_camera_color_gain=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -225,7 +231,12 @@ class RealFairino5EnvBase(RealEnvBase):
         # non-dry-run mode)
         if not self.dry_run:
             self.setup_realsense(camera_ids)
-            self.setup_femtobolt(pointcloud_camera_ids)
+            self.setup_femtobolt(
+                pointcloud_camera_ids,
+                pointcloud_camera_color_resolution,
+                pointcloud_camera_color_exposure,
+                pointcloud_camera_color_gain,
+            )
             self.setup_gelsight(gelsight_ids)
         else:
             # In dry-run mode, initialize empty sensor dicts

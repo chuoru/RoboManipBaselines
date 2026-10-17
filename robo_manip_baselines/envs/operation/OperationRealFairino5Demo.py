@@ -44,6 +44,9 @@ class OperationRealFairino5Demo:
         camera_ids=None,
         gelsight_ids=None,
         pointcloud_camera_ids=None,
+        pointcloud_camera_color_resolution=None,
+        pointcloud_camera_color_exposure=None,
+        pointcloud_camera_color_gain=None,
         gripper_hand_type="right",
         gripper_modbus_port="/dev/ttyUSB0",
         gripper_type="tool_do",
@@ -75,6 +78,9 @@ class OperationRealFairino5Demo:
         self.camera_ids = camera_ids
         self.gelsight_ids = gelsight_ids
         self.pointcloud_camera_ids = pointcloud_camera_ids
+        self.pointcloud_camera_color_resolution = pointcloud_camera_color_resolution
+        self.pointcloud_camera_color_exposure = pointcloud_camera_color_exposure
+        self.pointcloud_camera_color_gain = pointcloud_camera_color_gain
         self.gripper_hand_type = gripper_hand_type
         self.gripper_modbus_port = gripper_modbus_port
         self.gripper_type = gripper_type
@@ -104,6 +110,9 @@ class OperationRealFairino5Demo:
             camera_ids=self.camera_ids,
             gelsight_ids=self.gelsight_ids,
             pointcloud_camera_ids=self.pointcloud_camera_ids,
+            pointcloud_camera_color_resolution=self.pointcloud_camera_color_resolution,
+            pointcloud_camera_color_exposure=self.pointcloud_camera_color_exposure,
+            pointcloud_camera_color_gain=self.pointcloud_camera_color_gain,
             gripper_hand_type=self.gripper_hand_type,
             gripper_modbus_port=self.gripper_modbus_port,
             gripper_type=self.gripper_type,

@@ -30,35 +30,36 @@ class EpisodeRelativeEefPoseRetargeter:
         self.ref_se3 = ref_se3.copy()
         self.pos_scale = pos_scale
 
-        self._fwd_input_rotation_0 = None
-        self._fwd_prev_input_se3 = None
-        self._fwd_translation = ref_se3.translation.copy()
-
         self._inv_prev_measured_se3 = None
         self._inv_translation = np.zeros(3)
 
     def to_absolute(self, rel_se3):
         """Forward: given the policy's raw predicted COMMAND_EEF_POSE (in
         episode-relative/UMI convention), return the ABSOLUTE SE3 target to
-        feed ArmManager.set_command_eef_pose. The first call establishes the
-        episode's own rotation reference and returns ref_se3 unchanged."""
-        if self._fwd_input_rotation_0 is None:
-            self._fwd_input_rotation_0 = rel_se3.rotation.copy()
-            self._fwd_prev_input_se3 = rel_se3.copy()
+        feed ArmManager.set_command_eef_pose: simply ref_se3 composed with the
+        (position-scaled) relative pose.
 
-        delta_rotation = self._fwd_input_rotation_0.T @ rel_se3.rotation
-        target_rotation = self.ref_se3.rotation @ delta_rotation
+        This is the exact inverse of to_episode_relative() below (whose
+        incremental update reduces algebraically to
+        p_rel = ref.R^T (p_abs - p_ref) / pos_scale, R_rel = ref.R^T R_abs).
 
-        raw_translation_delta = (
-            rel_se3.translation - self._fwd_prev_input_se3.translation
+        It used to be incremental instead -- anchored to the FIRST input and
+        accumulating only the changes between successive inputs. That is
+        identical when the input sequence starts at identity (a recorded demo
+        replayed by misc/ReplayUmiOnFairino5.py), but wrong for a policy: a
+        policy's predictions are absolute targets in the episode frame, and
+        its very first one is already offset from identity (it predicts the
+        next pose). Anchoring on it discarded that offset, and while the arm
+        then stood still the policy kept predicting the same pose, so the
+        target never left the start pose -- observed on the real FR5 as ACT
+        rollouts that did not move at all and Diffusion Policy rollouts that
+        only jittered by their own prediction noise.
+        """
+        target_rotation = self.ref_se3.rotation @ rel_se3.rotation
+        target_translation = self.ref_se3.translation + self.pos_scale * (
+            self.ref_se3.rotation @ rel_se3.translation
         )
-        translation_delta_local = rel_se3.rotation.T @ raw_translation_delta
-        self._fwd_translation = self._fwd_translation + self.pos_scale * (
-            target_rotation @ translation_delta_local
-        )
-        self._fwd_prev_input_se3 = rel_se3.copy()
-
-        return pin.SE3(target_rotation, self._fwd_translation.copy())
+        return pin.SE3(target_rotation, target_translation)
 
     def to_episode_relative(self, abs_se3):
         """Inverse: given the arm's current ABSOLUTE measured SE3, return the
