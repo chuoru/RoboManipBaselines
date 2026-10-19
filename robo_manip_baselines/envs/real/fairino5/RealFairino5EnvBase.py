@@ -127,6 +127,9 @@ class RealFairino5EnvBase(RealEnvBase):
         pointcloud_camera_color_resolution=None,
         pointcloud_camera_color_exposure=None,
         pointcloud_camera_color_gain=None,
+        # Depth-based background removal on the camera image [m] (None = off),
+        # see RealEnvBase.setup_femtobolt.
+        pointcloud_camera_background_max_depth=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -247,6 +250,7 @@ class RealFairino5EnvBase(RealEnvBase):
                 pointcloud_camera_color_resolution,
                 pointcloud_camera_color_exposure,
                 pointcloud_camera_color_gain,
+                pointcloud_camera_background_max_depth,
             )
             self.setup_gelsight(gelsight_ids)
         else:

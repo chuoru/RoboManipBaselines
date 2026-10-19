@@ -1,0 +1,123 @@
+# Same as RealFairino5DemoEnv_UmiPolicy.yaml, plus depth-based background removal on the hand camera image,
+# for policies trained on data written by misc/MaskRmbBackgroundByDepth.py
+# (e.g. RealUMIDemo_train_20261017_bgmask*). The distance MUST equal the one the
+# training data was masked with (stored in its <camera>_rgb_image_background_max_depth attr).
+#
+# Config for running a policy trained on UMI-collected demos
+# (RealUMIDemo) on the real FR5.
+#
+# Same as RealFairino5DemoEnv.yaml, except the hand camera is enabled: a
+# policy trained with `--camera_names hand` takes that camera's image as an
+# observation every step, and without it the env never populates
+# info["rgb_images"], so rollout dies with `KeyError: 'rgb_images'` the moment
+# the policy first tries to read an image.
+#
+# The camera and its serial MUST match what the demos were recorded with (see
+# envs/configs/RealUMIDemo.yaml) -- it is the same physical Orbbec camera,
+# moved from the UMI rig to the arm. A different camera, or the same one
+# mounted differently, changes the observation the policy was trained on.
+robot_ip: "192.168.57.2"
+# Orbbec Gemini, connected via pyorbbecsdk rather than pyrealsense2, so it
+# goes under pointcloud_camera_ids (see setup_femtobolt in
+# envs/real/RealEnvBase.py) keyed by serial number rather than device order.
+# List serials with:
+#   python ./third_party/pyorbbecsdk/examples/enumerate.py
+pointcloud_camera_ids:
+  hand: "CV2L3600005M"
+# Match the training demos' 1280x800 color profile (see
+# envs/configs/RealUMIDemo.yaml). Without it the camera falls back to its
+# default profile (848x530 resized to 640x480 -- different aspect ratio/FOV).
+pointcloud_camera_color_resolution: [1280, 800, 10]
+# Auto-exposure, NOT the demos' fixed 20/40. What has to match training is
+# the image BRIGHTNESS, and the robot cell is much darker than where the
+# demos were recorded: with fixed 20/40, rollout frames averaged ~57/255 vs.
+# 124-142 in the training data (2026-10-17), and policies failed. The view
+# also swings between the dark cell and bright windows as the arm moves, so
+# no single fixed value fits; auto-exposure measured ~120 here. The demos
+# needed a short fixed exposure only to keep the UMI finger AprilTags
+# blur-free -- nothing is read from markers on the robot. If you go back to
+# fixed values, re-check brightness against the training data first.
+pointcloud_camera_color_exposure: auto
+gripper_hand_type: "right"
+gripper_modbus_port: "/dev/ttyUSB0"
+
+# Diagnostic CSV: per-command joint positions at each stage (raw policy
+# output, after the safety hard-clip/velocity-clamp, after EMA smoothing,
+# and what was actually sent to ServoJ) alongside the measured position.
+# See log_command_for_safety_debug() in envs/real/RealEnvBase.py. A
+# timestamp is appended to the filename, so this is safe to leave on.
+command_log_path: "./logs/command_log.csv"
+
+# HOW TO SLOW THIS ROLLOUT DOWN: use time_scale, not joint_vel_limit_scale.
+#
+# time_scale stretches the control period, so the observation cadence and the
+# arm's speed slow down TOGETHER -- the spatial change the policy sees between
+# its two observation steps is unchanged from training, so the closed loop
+# stays consistent. 2.0 = half the speed the demos were performed at, matching
+# the --time_scale 2 that ReplayUmiOnFairino5.py needed for this same demo on
+# this arm.
+time_scale: 2.0  # overridden below
+
+# Safety net ONLY -- deliberately left with headroom so it almost never fires.
+#
+# Do NOT lower this to slow the arm down. The clamp throttles the command
+# without the policy knowing: the arm falls behind, the policy observes the
+# lagging state, replans a different trajectory, and the target reverses.
+# Measured on hardware at 15 deg/s against a policy demanding ~75 deg/s peak:
+# clamp firing on 43% of ticks, command-vs-measured error reaching 20 deg, and
+# the commanded joint angle flipping direction on ~50% of ticks -- fast,
+# jerky, oscillating motion that got WORSE the more the clamp was tightened.
+#
+# At time_scale 2.0 the policy's peak demand is ~37 deg/s, so 2.0 (60 deg/s)
+# leaves real headroom. Check a fresh command_log: hit_hard_clip should be
+# near 0. If it is not, raise time_scale rather than lowering this.
+joint_vel_limit_scale: 2.0
+
+# ABSOLUTE per-command joint motion limit [deg]. The arm can never move more
+# than this on any single ServoJ command, whatever else happens -- it is
+# enforced on the exact values transmitted, after the velocity clamp and the
+# EMA, and is NOT scaled by the loop period, so timing jitter cannot widen it.
+# This is what stops a rare action-chunk-boundary spike (measured up to 13.7
+# deg, ~340 deg/s) from being executed as one lurch: at 2.0 it is spread over
+# ~7 commands instead.
+#
+# Do NOT set this much lower without re-testing end to end. It is not a
+# "slower but otherwise equivalent" knob -- too tight a cap makes the command
+# lag so far behind that the policy observes states no demonstration ever
+# contained, and it stalls outright. Measured in dry run on this checkpoint:
+#   2.0 deg -> task completes in 65 policy steps (training took 85)
+#   0.5 deg -> arm reaches the target, then sits there; still 0.268 m from
+#              the start pose after 1499 policy steps, task never finishes
+max_joint_pos_delta_deg: 2.0
+
+# EMA smoothing on the commanded joint position (1.0 = off, lower = smoother
+# but laggier). Left at the long-standing 0.3.
+#
+# Measured at time_scale 2.0 -- stronger smoothing does NOT buy smoothness
+# here and costs completion, the same failure mode as too small a
+# max_joint_pos_delta_deg:
+#   0.30 -> task completes; step-size variation (std/mean) 0.77
+#   0.12 -> task NEVER completes;  variation 0.75 (i.e. no better)
+# The residual unevenness is in the policy's own commanded trajectory (rare
+# spikes that saturate max_joint_pos_delta_deg), not something a low-pass on
+# the joint command can remove. Raise time_scale to make it gentler.
+command_smoothing_alpha: 0.3
+
+# Gripper (binary IAI, tool DO) matched to the UMI training data, where the
+# marker-measured percent-closed while holding the cup is ~47-70% (median
+# ~60%) and ~0-10% when open: close at >=30% and report "closed" as 60%.
+# Matters most for policies whose only state input is the gripper.
+tool_do_close_threshold: 30.0
+tool_do_closed_percent: 60.0
+
+# Depth-based background removal [m] -- see common/utils/DepthMaskUtils.py.
+pointcloud_camera_background_max_depth: 0.6
+
+# Control period = training data period. The UMI data is recorded at 15 Hz
+# (67 ms/step) and these policies output per-step RELATIVE motions, so one
+# policy step must take 67 ms: time_scale = (1/15) / 0.02 = 3.33. (The
+# time_scale 2.0 above dates from 50 Hz data; with 15 Hz data it ran every
+# demo step in 40 ms, i.e. ~1.7x demo speed, and also spaced the policy's two
+# observation frames 40 ms apart instead of the 67 ms it was trained on.)
+# Raise it (e.g. 5.0 = ~0.67x demo speed) to slow the arm down.
+time_scale: 3.33

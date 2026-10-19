@@ -33,6 +33,7 @@ from .utils.MathUtils import (
 )
 from .utils.PoseUtils import get_pose9_from_pose7, get_pose7_from_pose9
 from .utils.EefPoseRetargetUtils import EpisodeRelativeEefPoseRetargeter
+from .utils.DepthMaskUtils import get_background_mask, mask_background_by_depth
 from .utils.VisionUtils import (
     crop_and_resize,
     convert_depth_image_to_color_image,

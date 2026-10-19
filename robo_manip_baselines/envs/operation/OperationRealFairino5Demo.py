@@ -47,6 +47,7 @@ class OperationRealFairino5Demo:
         pointcloud_camera_color_resolution=None,
         pointcloud_camera_color_exposure=None,
         pointcloud_camera_color_gain=None,
+        pointcloud_camera_background_max_depth=None,
         gripper_hand_type="right",
         gripper_modbus_port="/dev/ttyUSB0",
         gripper_type="tool_do",
@@ -85,6 +86,7 @@ class OperationRealFairino5Demo:
         self.pointcloud_camera_color_resolution = pointcloud_camera_color_resolution
         self.pointcloud_camera_color_exposure = pointcloud_camera_color_exposure
         self.pointcloud_camera_color_gain = pointcloud_camera_color_gain
+        self.pointcloud_camera_background_max_depth = pointcloud_camera_background_max_depth
         self.gripper_hand_type = gripper_hand_type
         self.gripper_modbus_port = gripper_modbus_port
         self.gripper_type = gripper_type
@@ -119,6 +121,7 @@ class OperationRealFairino5Demo:
             pointcloud_camera_color_resolution=self.pointcloud_camera_color_resolution,
             pointcloud_camera_color_exposure=self.pointcloud_camera_color_exposure,
             pointcloud_camera_color_gain=self.pointcloud_camera_color_gain,
+            pointcloud_camera_background_max_depth=self.pointcloud_camera_background_max_depth,
             gripper_hand_type=self.gripper_hand_type,
             gripper_modbus_port=self.gripper_modbus_port,
             gripper_type=self.gripper_type,

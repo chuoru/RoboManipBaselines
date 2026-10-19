@@ -14,6 +14,7 @@ import gymnasium as gym
 import numpy as np
 
 from robo_manip_baselines.common import ArmConfig, DataKey, EnvDataMixin
+from robo_manip_baselines.common import mask_background_by_depth
 from robo_manip_baselines.common import read_insta360_message
 
 
@@ -205,8 +206,15 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         color_resolution=None,
         color_exposure=None,
         color_gain=None,
+        background_max_depth=None,
     ):
-        """color_resolution: None (default) keeps the previous behavior --
+        """background_max_depth: None (default) delivers the RGB image as is.
+        A distance [m] blacks out every pixel farther than that (and isolated
+        far blobs) using the depth image -- see
+        common/utils/DepthMaskUtils.py. Must match the value the policy's
+        training data was masked with (misc/MaskRmbBackgroundByDepth.py).
+
+        color_resolution: None (default) keeps the previous behavior --
         request the sensor's default color profile and resize/deliver at
         (640, 480), same as always. Pass (width, height, fps) -- e.g.
         (1280, 800, 10), a resolution this camera was confirmed to support
@@ -256,6 +264,7 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
         self._femtobolt_color_resolution = color_resolution
         self._femtobolt_color_exposure = color_exposure
         self._femtobolt_color_gain = color_gain
+        self._femtobolt_background_max_depth = background_max_depth
 
         sys.path.append(
             os.path.join(os.path.dirname(__file__), "../../../third_party/pyorbbecsdk")
@@ -1341,6 +1350,19 @@ class RealEnvBase(EnvDataMixin, gym.Env, ABC):
             depth_image = cv2.resize(
                 depth_image, color_target_size, interpolation=cv2.INTER_NEAREST
             )
+
+        background_max_depth = getattr(self, "_femtobolt_background_max_depth", None)
+        if background_max_depth is not None:
+            if depth_frame is None:
+                # Never hand the policy an unmasked frame: reuse the last
+                # masked one if this tick's frame set has no depth.
+                if pointcloud_camera["last_result"] is not None:
+                    return pointcloud_camera_name, pointcloud_camera["last_result"]
+                rgb_image = np.zeros_like(rgb_image)
+            else:
+                rgb_image = mask_background_by_depth(
+                    rgb_image, depth_image, background_max_depth
+                )
 
         result = {
             "rgb_images": rgb_image,
