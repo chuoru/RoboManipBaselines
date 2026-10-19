@@ -6,6 +6,7 @@ from robo_manip_baselines.common import (
     DatasetBase,
     RmbData,
     convert_data_to_policy,
+    get_relative_eef_pose9,
     get_skipped_data_seq,
     get_skipped_single_data,
 )
@@ -42,14 +43,32 @@ class ActDataset(DatasetBase):
                 )
 
             # Load action
+            relative_eef_action = self.model_meta_info["data"].get(
+                "relative_eef_action", False
+            )
+            if relative_eef_action:
+                # Pose at the observation (inference) time.
+                ref_pose = get_skipped_single_data(
+                    rmb_data[DataKey.MEASURED_EEF_POSE],
+                    start_time_idx * skip,
+                    DataKey.MEASURED_EEF_POSE,
+                    skip,
+                )
             action = np.concatenate(
                 [
-                    convert_data_to_policy(
+                    get_relative_eef_pose9(
+                        get_skipped_data_seq(
+                            rmb_data[key][start_time_idx * skip :], key, skip
+                        )[:chunk_size],
+                        ref_pose,
+                    )
+                    if relative_eef_action and key == DataKey.COMMAND_EEF_POSE
+                    else convert_data_to_policy(
                         get_skipped_data_seq(
                             rmb_data[key][start_time_idx * skip :],
                             key,
                             skip,
-                        ),
+                        )[:chunk_size],
                         key,
                     )
                     for key in self.model_meta_info["action"]["keys"]

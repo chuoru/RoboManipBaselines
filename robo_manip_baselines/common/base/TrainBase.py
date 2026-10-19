@@ -28,6 +28,7 @@ from ..data.RmbData import RmbData
 from ..utils.DataUtils import convert_data_to_policy, get_skipped_data_seq
 from ..utils.FileUtils import find_rmb_files
 from ..utils.MathUtils import set_random_seed
+from ..utils.RelativeEefActionUtils import get_relative_eef_pose9
 from ..utils.MiscUtils import remove_prefix
 
 
@@ -116,6 +117,17 @@ class TrainBase(ABC):
             nargs="*",
             default=["front"],
             help="camera names",
+        )
+
+        parser.add_argument(
+            "--relative_eef_action",
+            action="store_true",
+            help=(
+                "UMI-style action: express the command_eef_pose action chunk "
+                "relative to measured_eef_pose at the observation time (see "
+                "common/utils/RelativeEefActionUtils.py). Requires "
+                "command_eef_pose in --action_keys."
+            ),
         )
 
         parser.add_argument(
@@ -296,6 +308,7 @@ class TrainBase(ABC):
             "data": {
                 "name": self.get_combined_dataset_name(),
                 "skip": self.args.skip,
+                "relative_eef_action": self.args.relative_eef_action,
             },
             "policy": {"name": self.policy_name},
             "train": {
@@ -391,6 +404,8 @@ class TrainBase(ABC):
                 # Load action
                 if len(self.args.action_keys) == 0:
                     action = np.zeros((episode_len, 0), dtype=np.float64)
+                elif self.args.relative_eef_action:
+                    action = self.get_relative_action_samples(rmb_data, episode_len)
                 else:
                     action = np.concatenate(
                         [
@@ -439,6 +454,44 @@ class TrainBase(ABC):
                 "max_episode_len": np.max(episode_len_list),
             }
         )
+
+    def get_relative_action_samples(self, rmb_data, episode_len):
+        """Every action value the relative-action datasets can produce for this
+        episode (all observation times x all offsets of an action window), for
+        the normalization stats: command_eef_pose relative to measured_eef_pose
+        at the observation time, other action keys as is."""
+        if DataKey.COMMAND_EEF_POSE not in self.args.action_keys:
+            raise ValueError(
+                f"[{self.__class__.__name__}] --relative_eef_action requires "
+                f"{DataKey.COMMAND_EEF_POSE} in --action_keys."
+            )
+        data_info = self.model_meta_info["data"]
+        n_obs_steps = data_info.get("n_obs_steps") or 1
+        horizon = data_info.get("horizon") or data_info.get("chunk_size")
+        offsets = np.arange(-(n_obs_steps - 1), horizon - (n_obs_steps - 1))
+
+        seq = {
+            key: get_skipped_data_seq(rmb_data[key][:], key, self.args.skip)
+            for key in self.args.action_keys
+        }
+        ref_seq = get_skipped_data_seq(
+            rmb_data[DataKey.MEASURED_EEF_POSE][:], DataKey.MEASURED_EEF_POSE, self.args.skip
+        )
+        samples = []
+        for obs_idx in range(episode_len):
+            idxes = np.clip(obs_idx + offsets, 0, episode_len - 1)
+            samples.append(
+                np.concatenate(
+                    [
+                        get_relative_eef_pose9(seq[key][idxes], ref_seq[obs_idx])
+                        if key == DataKey.COMMAND_EEF_POSE
+                        else convert_data_to_policy(seq[key][idxes], key)
+                        for key in self.args.action_keys
+                    ],
+                    axis=1,
+                )
+            )
+        return np.concatenate(samples)
 
     def calc_stats_from_seq(self, data_seq):
         data_min = data_seq.min(axis=0)

@@ -7,6 +7,7 @@ from robo_manip_baselines.common import (
     DpStyleDatasetMixin,
     RmbData,
     convert_data_to_policy,
+    get_relative_eef_pose9,
     get_skipped_data_seq,
 )
 
@@ -52,9 +53,24 @@ class DiffusionPolicyDataset(DatasetBase, DpStyleDatasetMixin):
                 )
 
             # Load action
+            relative_eef_action = self.model_meta_info["data"].get(
+                "relative_eef_action", False
+            )
+            if relative_eef_action:
+                # Pose at the observation (inference) time = the last
+                # observation step of this window.
+                obs_time_idx = time_idxes[self.model_meta_info["data"]["n_obs_steps"] - 1]
+                ref_pose = get_skipped_data_seq(
+                    rmb_data[DataKey.MEASURED_EEF_POSE][:], DataKey.MEASURED_EEF_POSE, skip
+                )[obs_time_idx]
             action = np.concatenate(
                 [
-                    convert_data_to_policy(
+                    get_relative_eef_pose9(
+                        get_skipped_data_seq(rmb_data[key][:], key, skip)[time_idxes],
+                        ref_pose,
+                    )
+                    if relative_eef_action and key == DataKey.COMMAND_EEF_POSE
+                    else convert_data_to_policy(
                         get_skipped_data_seq(rmb_data[key][:], key, skip)[time_idxes],
                         key,
                     )

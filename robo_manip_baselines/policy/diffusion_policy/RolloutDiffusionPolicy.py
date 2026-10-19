@@ -162,12 +162,19 @@ class RolloutDiffusionPolicy(RolloutBase):
             action = self.policy.predict_action(input_data)["action"][0]
             action = action.cpu().detach().numpy().astype(np.float64)
             action = action[self.args.drop_initial_actions :]
+            if self.relative_eef_action:
+                # Anchor the whole chunk on the pose at THIS inference time;
+                # the buffer then holds denormalized absolute actions.
+                action = self.get_absolute_action_chunk(action)
             self.policy_action_buf = list(action)
 
         # Store action
-        self.policy_action = denormalize_data(
-            self.policy_action_buf.pop(0), self.model_meta_info["action"]
-        )
+        if self.relative_eef_action:
+            self.policy_action = self.policy_action_buf.pop(0)
+        else:
+            self.policy_action = denormalize_data(
+                self.policy_action_buf.pop(0), self.model_meta_info["action"]
+            )
         self.policy_action_list = np.concatenate(
             [self.policy_action_list, self.policy_action[np.newaxis]]
         )

@@ -41,9 +41,11 @@ from ..manager.PhaseManager import PhaseManager
 from ..utils.DataUtils import (
     convert_data_from_policy,
     convert_data_to_policy,
+    denormalize_data,
     normalize_data,
 )
 from ..utils.EefPoseRetargetUtils import EpisodeRelativeEefPoseRetargeter
+from ..utils.RelativeEefActionUtils import get_absolute_eef_pose9
 from ..utils.MathUtils import get_pose_from_se3, get_se3_from_pose, set_random_seed
 from ..utils.MiscUtils import remove_prefix, remove_suffix
 from .PhaseBase import PhaseBase
@@ -870,8 +872,36 @@ class RolloutBase(OperationDataMixin, ABC):
 
         return measured_data
 
+    @property
+    def relative_eef_action(self):
+        return self.model_meta_info["data"].get("relative_eef_action", False)
+
+    def get_absolute_action_chunk(self, action_chunk):
+        """Normalized policy output (N, action_dim) of a --relative_eef_action
+        policy -> denormalized actions whose command_eef_pose part is an
+        ABSOLUTE pose (policy 9D representation), anchored on the arm's
+        measured pose at this (inference) time."""
+        actions = np.stack(
+            [denormalize_data(a, self.model_meta_info["action"]) for a in action_chunk]
+        )
+        ref_pose = self.motion_manager.get_data(DataKey.MEASURED_EEF_POSE, self.obs)
+        action_idx = 0
+        for key in self.action_keys:
+            action_dim = DataKey.get_dim_for_policy(key, self.env)
+            if key == DataKey.COMMAND_EEF_POSE:
+                actions[:, action_idx : action_idx + action_dim] = get_absolute_eef_pose9(
+                    actions[:, action_idx : action_idx + action_dim], ref_pose
+                )
+            action_idx += action_dim
+        return actions
+
     def setup_eef_pose_retargeter(self):
         self._eef_pose_retargeter = None
+
+        # Relative-to-current-pose actions are made absolute at inference time
+        # (get_absolute_action_chunk); there is no episode frame to map.
+        if self.relative_eef_action:
+            return
 
         if (DataKey.MEASURED_EEF_POSE not in self.state_keys) and (
             DataKey.COMMAND_EEF_POSE not in self.action_keys

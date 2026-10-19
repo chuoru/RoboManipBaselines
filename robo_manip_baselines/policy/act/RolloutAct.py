@@ -71,9 +71,12 @@ class RolloutAct(RolloutBase):
             state = self.get_state()
             images = self.get_images()
             action = self.policy(state, images)[0]
-            self.policy_action_buf = list(
-                action.cpu().detach().numpy().astype(np.float64)
-            )
+            action = action.cpu().detach().numpy().astype(np.float64)
+            if self.relative_eef_action:
+                # Each chunk is relative to the pose at ITS inference time, so
+                # make it absolute before it is ensembled with older chunks.
+                action = self.get_absolute_action_chunk(action)
+            self.policy_action_buf = list(action)
             if not self.args.no_temp_ensem:
                 self.policy_action_buf_history.append(self.policy_action_buf)
                 if (
@@ -95,7 +98,10 @@ class RolloutAct(RolloutBase):
                 reversed(self.policy_action_buf_history)
             ):
                 action += exp_weights[::-1][action_idx] * _policy_action_buf[action_idx]
-        self.policy_action = denormalize_data(action, self.model_meta_info["action"])
+        if self.relative_eef_action:
+            self.policy_action = action  # already denormalized (absolute)
+        else:
+            self.policy_action = denormalize_data(action, self.model_meta_info["action"])
         self.policy_action_list = np.concatenate(
             [self.policy_action_list, self.policy_action[np.newaxis]]
         )
