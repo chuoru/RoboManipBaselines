@@ -127,6 +127,9 @@ class RealFairino5EnvBase(RealEnvBase):
         # this point, so it must match the TCP the policy's data was recorded
         # at (UMI rig: the flange face centre).
         ik_eef_offset_pose=None,
+        # Fixed wall-clock period [s] of the rollout loop, read by
+        # RolloutBase (--control_period). None = not fixed.
+        control_period=None,
         pointcloud_camera_ids=None,
         # Orbbec color profile / fixed exposure, same meaning as in
         # RealUMIEnvBase (see RealEnvBase.setup_femtobolt). A policy trained
@@ -150,6 +153,7 @@ class RealFairino5EnvBase(RealEnvBase):
         self.max_joint_pos_delta_deg = max_joint_pos_delta_deg
         self.tool_do_close_threshold = tool_do_close_threshold
         self.tool_do_closed_percent = tool_do_closed_percent
+        self.control_period = control_period
         # Previously transmitted arm joint command [deg], the anchor for
         # max_joint_pos_delta_deg. None = nothing sent since the last reset or
         # out-of-stream move, so the next command anchors on the measurement.

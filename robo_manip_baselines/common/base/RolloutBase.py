@@ -324,6 +324,20 @@ class RolloutBase(OperationDataMixin, ABC):
             help="step interval to infer policy",
         )
         parser.add_argument(
+            "--control_period",
+            type=float,
+            default=None,
+            help=(
+                "fix the wall-clock period [s] of each rollout loop iteration "
+                "(sleeping out the remainder). Each iteration is then one "
+                "policy step, so set it to the training data period x the "
+                "training --skip (e.g. 15 Hz data, --skip 3 -> 0.2) and --skip "
+                "defaults to 1. Falls back to the env config's control_period. "
+                "Without it the loop period is the env dt PLUS everything else "
+                "in the loop (state reads, camera, inference)."
+            ),
+        )
+        parser.add_argument(
             "--skip_draw",
             type=int,
             help="step interval to draw the plot",
@@ -491,6 +505,7 @@ class RolloutBase(OperationDataMixin, ABC):
         self.action_dim = len(self.model_meta_info["action"]["example"])
 
         # Set skip if not specified
+        self._skip_from_model = self.args.skip is None
         if self.args.skip is None:
             self.args.skip = self.model_meta_info["data"]["skip"]
         if self.args.skip_draw is None:
@@ -669,6 +684,17 @@ class RolloutBase(OperationDataMixin, ABC):
         self.inference_duration_list = []
         self.episode_saved = False
 
+        if self.args.control_period is None:
+            self.args.control_period = getattr(self.env.unwrapped, "control_period", None)
+        if self.args.control_period is not None:
+            if self._skip_from_model:
+                self.args.skip = 1
+            print(
+                f"[{self.__class__.__name__}] Fixed control period "
+                f"{self.args.control_period * 1000:.0f} ms per loop, policy inferred "
+                f"every {self.args.skip} loop(s)."
+            )
+
         try:
             self.main_loop()
         except KeyboardInterrupt:
@@ -701,6 +727,7 @@ class RolloutBase(OperationDataMixin, ABC):
 
     def main_loop(self):
         while True:
+            loop_start_time = time.time()
             if self.reset_flag:
                 self.reset()
                 self.reset_flag = False
@@ -745,6 +772,11 @@ class RolloutBase(OperationDataMixin, ABC):
                 self.quit_flag = True
             if self.quit_flag:
                 break
+
+            if self.args.control_period is not None:
+                remaining = self.args.control_period - (time.time() - loop_start_time)
+                if remaining > 0:
+                    time.sleep(remaining)
 
     def finalize(self):
         if self.args.result_filename is not None:

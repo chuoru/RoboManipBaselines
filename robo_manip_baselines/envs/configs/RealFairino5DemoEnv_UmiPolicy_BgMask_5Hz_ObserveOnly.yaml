@@ -1,0 +1,97 @@
+# Same as RealFairino5DemoEnv_UmiPolicy_BgMask_ObserveOnly.yaml, but for policies trained with --skip 3 on the 15 Hz UMI
+# data, i.e. one policy step = 200 ms (5 Hz). The real-robot loop could not
+# hold 67 ms (measured 100-230 ms with state reads, camera and inference), so
+# the step is lengthened to one both policies always meet, and the loop is
+# paced to exactly that instead of 'env dt + everything else'.
+#
+# Same as RealFairino5DemoEnv_UmiPolicy_ObserveOnly.yaml, plus depth-based background removal on the hand camera image,
+# for policies trained on data written by misc/MaskRmbBackgroundByDepth.py
+# (e.g. RealUMIDemo_train_20261017_bgmask*). The distance MUST equal the one the
+# training data was masked with (stored in its <camera>_rgb_image_background_max_depth attr).
+#
+# Config for running a policy trained on UMI-collected demos
+# (RealUMIDemo) on the real FR5.
+#
+# Same as RealFairino5DemoEnv.yaml, except the hand camera is enabled: a
+# policy trained with `--camera_names hand` takes that camera's image as an
+# observation every step, and without it the env never populates
+# info["rgb_images"], so rollout dies with `KeyError: 'rgb_images'` the moment
+# the policy first tries to read an image.
+#
+# The camera and its serial MUST match what the demos were recorded with (see
+# envs/configs/RealUMIDemo.yaml) -- it is the same physical Orbbec camera,
+# moved from the UMI rig to the arm. A different camera, or the same one
+# mounted differently, changes the observation the policy was trained on.
+robot_ip: "192.168.57.2"
+# Orbbec Gemini, connected via pyorbbecsdk rather than pyrealsense2, so it
+# goes under pointcloud_camera_ids (see setup_femtobolt in
+# envs/real/RealEnvBase.py) keyed by serial number rather than device order.
+# List serials with:
+#   python ./third_party/pyorbbecsdk/examples/enumerate.py
+pointcloud_camera_ids:
+  hand: "CV2L3600005M"
+# Match the training demos' 1280x800 color profile (see
+# envs/configs/RealUMIDemo.yaml). Without it the camera falls back to its
+# default profile (848x530 resized to 640x480 -- different aspect ratio/FOV).
+pointcloud_camera_color_resolution: [1280, 800, 10]
+# Auto-exposure, NOT the demos' fixed 20/40. What has to match training is
+# the image BRIGHTNESS, and the robot cell is much darker than where the
+# demos were recorded: with fixed 20/40, rollout frames averaged ~57/255 vs.
+# 124-142 in the training data (2026-10-17), and policies failed. The view
+# also swings between the dark cell and bright windows as the arm moves, so
+# no single fixed value fits; auto-exposure measured ~120 here. The demos
+# needed a short fixed exposure only to keep the UMI finger AprilTags
+# blur-free -- nothing is read from markers on the robot. If you go back to
+# fixed values, re-check brightness against the training data first.
+pointcloud_camera_color_exposure: auto
+gripper_hand_type: "right"
+gripper_modbus_port: "/dev/ttyUSB0"
+
+# Never transmit a motion command: the arm stays exactly where it is and the
+# gripper never actuates, while cameras and state readback stay live. Use this
+# to confirm the observations the policy will consume (hand camera image,
+# measured EEF pose, gripper state) look right before letting it drive the
+# hardware. See observe_only in envs/real/fairino5/RealFairino5EnvBase.py.
+observe_only: true
+
+# Match the real rollout's control period (see
+# RealFairino5DemoEnv_UmiPolicy.yaml), so the images and states checked here
+# are sampled at the same cadence the policy will actually see them at.
+# Override from the command line with --time_scale.
+time_scale: 2.0  # overridden below
+
+# Gripper (binary IAI, tool DO) matched to the UMI training data, where the
+# marker-measured percent-closed while holding the cup is ~47-70% (median
+# ~60%) and ~0-10% when open: close at >=30% and report "closed" as 60%.
+# Matters most for policies whose only state input is the gripper.
+tool_do_close_threshold: 30.0
+tool_do_closed_percent: 60.0
+
+# Depth-based background removal [m] -- see common/utils/DepthMaskUtils.py.
+pointcloud_camera_background_max_depth: 0.6
+
+# Control period = training data period. The UMI data is recorded at 15 Hz
+# (67 ms/step) and these policies output per-step RELATIVE motions, so one
+# policy step must take 67 ms: time_scale = (1/15) / 0.02 = 3.33. (The
+# time_scale 2.0 above dates from 50 Hz data; with 15 Hz data it ran every
+# demo step in 40 ms, i.e. ~1.7x demo speed, and also spaced the policy's two
+# observation frames 40 ms apart instead of the 67 ms it was trained on.)
+# Raise it (e.g. 5.0 = ~0.67x demo speed) to slow the arm down.
+time_scale: 3.33
+
+# IK controlled point = the tool flange face centre, which is the UMI rig's
+# TCP (the UMI data records the motion of that point). The FR5 URDF ends at
+# the joint-6 origin, 100 mm behind the flange face (measured: 99.96 mm along
+# joint-6 z, <0.1 mm off-axis); without this every commanded rotation pivoted
+# about a point 10 cm behind the TCP.
+ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+
+# ---- 5 Hz overrides (later keys win) ----
+# Whole rollout loop paced to 200 ms; RolloutBase then infers every loop
+# (--skip defaults to 1). time_scale only sets the env's own short wait.
+control_period: 0.2
+time_scale: 1.0
+# One command now carries 200 ms of motion (training data: median 1.7 cm,
+# p99 ~8 cm per 200 ms), so the per-command cap goes from 2 to 6 deg (the
+# 60 deg/s velocity clamp with its 0.1 s bound also allows 6 deg).
+max_joint_pos_delta_deg: 6.0
