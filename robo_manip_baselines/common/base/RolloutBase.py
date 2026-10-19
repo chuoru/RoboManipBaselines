@@ -730,7 +730,12 @@ class RolloutBase(OperationDataMixin, ABC):
             self.phase_manager.post_update()
 
             if self.args.no_plot:
-                self.key = -1
+                # The full matplotlib plot costs ~100-300 ms per step (it
+                # dominated the loop period on the real robot), but keys
+                # ('n' for --wait_before_start / finishing, Esc) must still
+                # work: show just the policy's camera image(s) instead.
+                self.show_camera_images()
+                self.key = cv2.waitKey(1)
             else:
                 self.key = cv2.waitKey(1)
 
@@ -1019,6 +1024,19 @@ class RolloutBase(OperationDataMixin, ABC):
             row += [f"{v:.6f}" for v in measured]
         self._policy_command_log_writer.writerow(row)
         self._policy_command_log_file.flush()
+
+    def show_camera_images(self):
+        images = [
+            cv2.resize(self.info["rgb_images"][camera_name], (480, 300))
+            for camera_name in self.camera_names
+            if camera_name in self.info.get("rgb_images", {})
+        ]
+        if len(images) == 0:
+            return
+        cv2.imshow(
+            f"{self.policy_name} (camera)",
+            cv2.cvtColor(np.hstack(images), cv2.COLOR_RGB2BGR),
+        )
 
     def get_data_filename(self, suffix=""):
         filename = os.path.normpath(
