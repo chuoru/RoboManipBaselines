@@ -74,6 +74,8 @@ class OperationRealFairino5Demo:
         # RealFairino5EnvBase.
         tool_do_close_threshold=50.0,
         tool_do_closed_percent=100.0,
+        # IK controlled point in the joint-6 frame -- see RealFairino5EnvBase.
+        ik_eef_offset_pose=None,
         # EMA smoothing applied to the commanded joint position before it is
         # sent (see RealFairino5EnvBase.command_smoothing_alpha). Lower =
         # smoother but laggier; 1.0 = no filtering.
@@ -100,6 +102,7 @@ class OperationRealFairino5Demo:
         self.max_joint_pos_delta_deg = max_joint_pos_delta_deg
         self.tool_do_close_threshold = tool_do_close_threshold
         self.tool_do_closed_percent = tool_do_closed_percent
+        self.ik_eef_offset_pose = ik_eef_offset_pose
         self.command_smoothing_alpha = command_smoothing_alpha
         super().__init__()
 
@@ -135,6 +138,7 @@ class OperationRealFairino5Demo:
             max_joint_pos_delta_deg=self.max_joint_pos_delta_deg,
             tool_do_close_threshold=self.tool_do_close_threshold,
             tool_do_closed_percent=self.tool_do_closed_percent,
+            ik_eef_offset_pose=self.ik_eef_offset_pose,
             command_smoothing_alpha=self.command_smoothing_alpha,
         )
 

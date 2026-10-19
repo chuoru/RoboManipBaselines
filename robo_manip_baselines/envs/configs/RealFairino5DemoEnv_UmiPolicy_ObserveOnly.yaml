@@ -55,3 +55,10 @@ time_scale: 2.0
 # Matters most for policies whose only state input is the gripper.
 tool_do_close_threshold: 30.0
 tool_do_closed_percent: 60.0
+
+# IK controlled point = the tool flange face centre, which is the UMI rig's
+# TCP (the UMI data records the motion of that point). The FR5 URDF ends at
+# the joint-6 origin, 100 mm behind the flange face (measured: 99.96 mm along
+# joint-6 z, <0.1 mm off-axis); without this every commanded rotation pivoted
+# about a point 10 cm behind the TCP.
+ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]

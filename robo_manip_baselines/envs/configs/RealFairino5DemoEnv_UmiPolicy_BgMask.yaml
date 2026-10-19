@@ -121,3 +121,10 @@ pointcloud_camera_background_max_depth: 0.6
 # observation frames 40 ms apart instead of the 67 ms it was trained on.)
 # Raise it (e.g. 5.0 = ~0.67x demo speed) to slow the arm down.
 time_scale: 3.33
+
+# IK controlled point = the tool flange face centre, which is the UMI rig's
+# TCP (the UMI data records the motion of that point). The FR5 URDF ends at
+# the joint-6 origin, 100 mm behind the flange face (measured: 99.96 mm along
+# joint-6 z, <0.1 mm off-axis); without this every commanded rotation pivoted
+# about a point 10 cm behind the TCP.
+ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]

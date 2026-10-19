@@ -120,6 +120,13 @@ class RealFairino5EnvBase(RealEnvBase):
         # commands in the high 40s.
         tool_do_close_threshold=50.0,
         tool_do_closed_percent=100.0,
+        # Controlled point for IK, as [x, y, z, qw, qx, qy, qz] in the joint-6
+        # frame. None = the joint-6 origin, which the URDF ends at -- 100 mm
+        # BEHIND the tool flange face ([0, 0, 0.1, 1, 0, 0, 0] is the flange
+        # face centre). Relative/episode-relative EEF commands rotate about
+        # this point, so it must match the TCP the policy's data was recorded
+        # at (UMI rig: the flange face centre).
+        ik_eef_offset_pose=None,
         pointcloud_camera_ids=None,
         # Orbbec color profile / fixed exposure, same meaning as in
         # RealUMIEnvBase (see RealEnvBase.setup_femtobolt). A policy trained
@@ -181,6 +188,7 @@ class RealFairino5EnvBase(RealEnvBase):
                 eef_idx=0,
                 init_arm_joint_pos=self.init_qpos[0:6],
                 init_gripper_joint_pos=np.zeros(1),
+                ik_eef_offset_pose=ik_eef_offset_pose,
             )
         ]
 

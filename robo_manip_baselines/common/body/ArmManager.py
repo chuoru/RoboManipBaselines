@@ -81,9 +81,7 @@ class ArmManager(BodyManagerBase):
         self.forward_kinematics()
 
         if init:
-            self._original_target_se3 = self.pin_data.oMi[
-                self.body_config.ik_eef_joint_id
-            ].copy()
+            self._original_target_se3 = self.current_se3.copy()
 
         self.target_se3 = self._original_target_se3.copy()
 
@@ -199,7 +197,7 @@ class ArmManager(BodyManagerBase):
     def get_eef_pose_from_joint_pos(self, arm_joint_pos):
         pin_data = self.pin_model.createData()
         pin.forwardKinematics(self.pin_model, pin_data, arm_joint_pos)
-        se3 = pin_data.oMi[self.body_config.ik_eef_joint_id]
+        se3 = pin_data.oMi[self.body_config.ik_eef_joint_id] * self.eef_offset_se3
         return get_pose_from_se3(se3)
 
     def get_command_data(self, key):
@@ -266,6 +264,8 @@ class ArmManager(BodyManagerBase):
             arm_joint_pos,
             self.body_config.ik_eef_joint_id,
         )  # in joint frame
+        # Jacobian of the (possibly offset) control frame, in that frame
+        J = self.eef_offset_se3.inverse().toActionMatrix() @ J
         J = -1 * np.dot(pin.Jlog6(error_se3.inverse()), J)
         damping_scale = 1e-6
         delta_arm_joint_pos = -1 * J.T.dot(
@@ -281,8 +281,21 @@ class ArmManager(BodyManagerBase):
         self.forward_kinematics()
 
     @property
+    def eef_offset_se3(self):
+        """Fixed transform from the IK joint frame to the controlled point
+        (identity unless ArmConfig.ik_eef_offset_pose is set)."""
+        if getattr(self, "_eef_offset_se3", None) is None:
+            offset_pose = self.body_config.ik_eef_offset_pose
+            self._eef_offset_se3 = (
+                pin.SE3.Identity()
+                if offset_pose is None
+                else get_se3_from_pose(np.asarray(offset_pose, dtype=np.float64))
+            )
+        return self._eef_offset_se3
+
+    @property
     def current_se3(self):
-        return self.pin_data.oMi[self.body_config.ik_eef_joint_id]
+        return self.pin_data.oMi[self.body_config.ik_eef_joint_id] * self.eef_offset_se3
 
 
 @dataclasses.dataclass
@@ -332,6 +345,12 @@ class ArmConfig(BodyConfigBase):
 
     # [Optional] Function to get the current arm root pose (used only for drawing markers)
     get_root_pose_func: Optional[Callable[..., Any]] = None
+
+    # [Optional] Pose [x, y, z, qw, qx, qy, qz] of the controlled point (TCP)
+    # relative to the ik_eef_joint_id joint frame. None = that joint frame itself.
+    # E.g. the FR5 URDF ends at the joint-6 origin, 100 mm behind the tool
+    # flange face; UMI-trained policies move the flange-face centre.
+    ik_eef_offset_pose: Optional[npt.NDArray[np.float64]] = None
 
     def __post_init__(self):
         if self.gripper_joint_idxes_for_limit is None:
