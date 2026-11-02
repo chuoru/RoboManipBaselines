@@ -10,8 +10,9 @@
 #     --demo_name CupPickPlace_place_SM_iter000
 #
 # Each demo: (reset pose) -> home -> above the fixture -> down -> close ->
-# up -> carry -> [operator: put the cup on the coaster and open the gripper]
-# -> auto finish once open -> SUCCESS saves / FAIL discards -> retreat up.
+# up -> carry -> [operator: put the cup on the coaster and open the gripper,
+# then INTERVENE ('n') right away] -> SUCCESS saves / FAIL discards ->
+# retreat up.
 # Put the cup back into the fixture and move the coaster before the next demo.
 segment: place
 poses: ../poses/CupPickPlace.yaml
@@ -25,5 +26,6 @@ pre_segments:
   - {joint_pos: carry}
 post_segments:
   - {rel_xyz: [0, 0, 0.08]}
-auto_finish_on: gripper_opened
-auto_finish_ticks: 5
+# Finished by hand (INTERVENE) right after opening, not by
+# auto_finish_on: gripper_opened. Set rearrange_after_demo: true to put the
+# cup back into the fixture with the arm between demos.

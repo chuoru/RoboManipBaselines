@@ -155,15 +155,43 @@ class EndTeleopPhase(PhaseBase):
             self.finish()
 
     def finish(self):
-        # With --pre_segments' post_segments (e.g. release and retreat after
-        # a grasp demo) those run first; ResetAfterSegmentsPhase resets.
-        if len(self.op.post_segment_phases) > 0:
+        # With --pre_segments' rearrange_after_demo / post_segments (e.g.
+        # release and retreat after a grasp demo) those run first;
+        # ResetAfterSegmentsPhase resets.
+        if self.op.rearrange_after_demo or len(self.op.post_segment_phases) > 0:
             self.decided = True
         else:
             self.op.reset_flag = True
 
     def check_transition(self):
         return self.decided
+
+
+class RearrangeTeleopPhase(PhaseBase):
+    """Free teleoperation after a demo was saved or discarded, NOT recorded:
+    the operator uses the arm to move the object somewhere else for the next
+    demo (variety of start positions without walking up to the table)."""
+
+    def start(self):
+        super().start()
+
+        for input_device in self.op.input_device_list:
+            # Forget the velocity-mode time stamp and filter state from the
+            # demo, so the first tick here cannot jump by the whole pause.
+            if hasattr(input_device, "reset_filter"):
+                input_device.reset_filter()
+        print(
+            f"[{self.op.__class__.__name__}] Not recording: move the object for "
+            "the next demo, then press the 'n' key."
+        )
+
+    def pre_update(self):
+        for input_device in self.op.input_device_list:
+            input_device.read()
+            input_device.set_command_data()
+
+    def check_transition(self):
+        return self.op.key == ord("n")
 
 
 class ResetAfterSegmentsPhase(PhaseBase):
@@ -540,6 +568,7 @@ class TeleopBase(OperationDataMixin, ABC):
         self.segment_name = None
         self.pre_segment_phases = []
         self.post_segment_phases = []
+        self.rearrange_after_demo = False
         if self.args.pre_segments is not None:
             path = resolve_path(self.args.pre_segments)
             with open(path, "r") as f:
@@ -559,6 +588,9 @@ class TeleopBase(OperationDataMixin, ABC):
                 make_primitive_phase(self, spec, named_poses)
                 for spec in self.collect_config.get("post_segments", [])
             ]
+            self.rearrange_after_demo = bool(
+                self.collect_config.get("rearrange_after_demo", False)
+            )
             if self.segment_name is not None:
                 # Recorded with every demo, like the segment runner's attempts.
                 self.data_manager.meta_data["segment"] = self.segment_name
@@ -567,7 +599,12 @@ class TeleopBase(OperationDataMixin, ABC):
             print(
                 f"[{self.__class__.__name__}] Segment '{self.segment_name}': "
                 f"{len(self.pre_segment_phases)} scripted step(s) before, "
-                f"{len(self.post_segment_phases)} after each demo."
+                f"{len(self.post_segment_phases)} after each demo"
+                + (
+                    ", unrecorded teleop in between to rearrange the scene."
+                    if self.rearrange_after_demo
+                    else "."
+                )
             )
         if self.args.auto_finish_on is None:
             self.args.auto_finish_on = self.collect_config.get("auto_finish_on")
@@ -605,7 +642,9 @@ class TeleopBase(OperationDataMixin, ABC):
             ]
             if self.args.sync_before_record:
                 operation_phases.insert(1, SyncPhase(self))
-            if len(self.post_segment_phases) > 0:
+            if self.rearrange_after_demo:
+                operation_phases.append(RearrangeTeleopPhase(self))
+            if self.rearrange_after_demo or len(self.post_segment_phases) > 0:
                 operation_phases += [
                     *self.post_segment_phases,
                     ResetAfterSegmentsPhase(self),
@@ -629,7 +668,7 @@ class TeleopBase(OperationDataMixin, ABC):
         def get_color_func(phase):
             if phase.name in ("InitialTeleopPhase", "StandbyTeleopPhase"):
                 return np.array([200, 200, 255])
-            elif phase.name in ("SyncPhase"):
+            elif phase.name in ("SyncPhase", "RearrangeTeleopPhase"):
                 return np.array([255, 255, 200])
             elif phase.name in ("TeleopPhase", "ReplayPhase"):
                 return np.array([255, 200, 200])

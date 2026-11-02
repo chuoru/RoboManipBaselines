@@ -8,8 +8,10 @@
 #     --demo_name CupPickPlace_grasp_SM_iter000
 #
 # Each demo: (reset pose) -> home -> [operator: approach the cup and close
-# the gripper] -> auto finish once closed -> SUCCESS saves / FAIL discards
-# -> the gripper releases the cup and the arm retreats upward.
+# the gripper, then INTERVENE ('n') right away] -> SUCCESS saves / FAIL
+# discards -> [unrecorded teleop: carry the cup somewhere else on the table
+# and open the gripper, then INTERVENE] -> the gripper opens and the arm
+# retreats upward -> home for the next demo.
 segment: grasp
 poses: ../poses/CupPickPlace.yaml
 # Same start pose as the grasp segment in CupPickPlace.yaml.
@@ -21,6 +23,10 @@ pre_segments:
 post_segments:
   - {gripper: open}
   - {rel_xyz: [0, 0, 0.08]}
-# Same end condition as the grasp segment.
-auto_finish_on: gripper_closed
-auto_finish_ticks: 5
+# Move the cup with the arm between demos, for varied start positions
+# without walking up to the table (TeleopBase RearrangeTeleopPhase).
+rearrange_after_demo: true
+# The demo is finished by hand (INTERVENE), not when the gripper closes:
+# auto_finish_on: gripper_closed would cut the demo at the first close,
+# which the operator may want to redo. Finish right after closing, so the
+# demos end where the segment runner ends the grasp segment.
