@@ -14,3 +14,18 @@ We performed rollouts at six different object positions for each of the five che
 
 #### Success rate vs. number of training demos
 <img width="2000" height="1200" alt="datanum" src="https://github.com/user-attachments/assets/f4c603d3-a63b-41bc-8bf6-620276ba3ebb" />
+
+## Exhibition task on the real FR5 (segmented policies, CupPickPlace)
+Endurance test of `bin/RolloutSegments.py --mode exhibit` (doc/segment_dagger_checklist.md, M7): grasp a cup anywhere on the table (learned), carry it (scripted), put it on the coaster a visitor placed (learned), repeat. Pass criterion: at least 30 cycles (about 1 hour) with at most one stop for the staff.
+
+Fill in one block per test run with the output of
+`python ./misc/SummarizeSegmentResults.py ./logs/segment_results_CupPickPlace_<date>.yaml`.
+
+### Run template
+- Date / place / lighting:
+- Checkpoints (grasp / place):
+- Coaster positions (range, edges included?):
+
+(paste the summary here)
+
+Notes (failure cases, what to collect or retrain next):

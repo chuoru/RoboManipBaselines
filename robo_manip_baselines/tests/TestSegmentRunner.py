@@ -240,6 +240,8 @@ class TestSegmentRunner(unittest.TestCase):
             self.assertIn(DataKey.MEASURED_GRIPPER_MARKER_WIDTH, attrs["_keys"])
         with open(runner.args.result_filename) as f:
             results = yaml.safe_load(f)
+        self.assertEqual(len(results["cycles"]), 1)
+        self.assertFalse(results["cycles"][0].get("incomplete", False))
         self.assertEqual(results["cycles"][0]["segments"]["grasp"]["result"], "success")
 
     def test_empty_grasp_is_retried(self):
@@ -307,6 +309,7 @@ class TestSegmentRunner(unittest.TestCase):
         self.assertEqual(runner.segment_stats["grasp"]["stopped"], 1)
         self.assertTrue(runner.cycle_results[0]["stopped"])
         self.assertIn("failed 3 times", runner.cycle_results[0]["stop_reason"])
+        self.assertEqual(len(runner.cycle_results), 2)
 
     def test_timeout(self):
         # The operator never closes the gripper; time under human control

@@ -1122,6 +1122,8 @@ class SegmentRunnerBase(OperationDataMixin):
             f"in {self.cycle_result['duration']:.1f} s "
             f"({self.stats['cycles_without_stop']}/{self.stats['cycles']} without a stop)."
         )
+        # Recorded; the next cycle gets a fresh dict (start_cycle).
+        self.cycle_result = None
         self.save_results()
         self.cycle_idx += 1
         if self.args.num_cycles is not None and self.cycle_idx >= self.args.num_cycles:
