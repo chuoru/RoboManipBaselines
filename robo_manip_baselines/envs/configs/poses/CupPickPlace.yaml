@@ -1,0 +1,23 @@
+# Named arm poses of the CupPickPlace task (envs/configs/segments/CupPickPlace.yaml
+# and collect_*.yaml), as the 6 FR5 joint angles.
+#
+# Record each pose on the real arm with
+#   python ./misc/RecordNamedPose.py --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
+#       --poses_file ./envs/configs/poses/CupPickPlace.yaml --names home carry fixture_above fixture_grasp
+# A pose left as null makes the segment runner refuse to start (on purpose:
+# a guessed pose can drive the arm into the table).
+#
+#   home          start pose of the grasp segment: camera looking down at the
+#                 whole area where the cup can be
+#   carry         start pose of the place segment: cup held, camera looking
+#                 down at the whole area where the coaster can be
+#   fixture_above above the cup fixture (place-demo collection, method B)
+#   fixture_grasp fingers around the cup in the fixture
+unit: deg
+poses:
+  # "init" = the env's reset pose (RealFairino5DemoEnv.READY_POSE_DEG).
+  # Replace with a recorded pose once the camera view is decided.
+  home: init
+  carry: null
+  fixture_above: null
+  fixture_grasp: null

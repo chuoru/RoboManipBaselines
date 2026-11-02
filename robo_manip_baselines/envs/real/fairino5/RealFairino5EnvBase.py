@@ -487,6 +487,73 @@ class RealFairino5EnvBase(RealEnvBase):
             f"[{self.__class__.__name__}] Start moving the robot to the reset position."
         )
 
+        # Open the gripper BEFORE moving the arm, not after: if the gripper was
+        # left closed around something from a previous session, moving the arm
+        # first would drag/crush whatever it's holding. Independent of
+        # init_qpos's gripper value (which is also sent again after the move,
+        # below) so this happens even if init_qpos's gripper component is ever
+        # non-zero for some env variant.
+        print(f"[{self.__class__.__name__}] Opening gripper before moving the arm.")
+        if self.dry_run:
+            print(f"[{self.__class__.__name__}] [DRY RUN] Would open gripper.")
+            self._last_gripper_closing = False
+        else:
+            self._send_gripper_command(0.0)
+
+        self.move_to_joint_pos(
+            self.init_qpos[self.body_config_list[0].arm_joint_idxes], vel=10.0
+        )
+
+        if not self.dry_run:
+            gripper_percent_closed = float(
+                self.init_qpos[self.body_config_list[0].gripper_joint_idxes][0]
+            )
+            self._send_gripper_command(gripper_percent_closed)
+
+        self._motion_enabled = True
+
+        print(
+            f"[{self.__class__.__name__}] Finish moving the robot to the reset position."
+        )
+
+    def move_to_joint_pos(self, arm_joint_pos, vel=10.0):
+        """Blocking point-to-point move of the arm to arm_joint_pos [rad]
+        (the 6 arm joints), outside the ServoJ stream. vel is MoveJ's speed
+        percentage. Used for the reset pose and for the scripted parts of a
+        segmented task (common/base/SegmentPhases.py).
+
+        The caller must refresh its observation afterwards (env._get_obs())
+        and re-anchor the motion manager on it: the arm has moved without
+        env.step(), so anything holding the pre-move pose (IK warm start, the
+        teleop/policy target) would otherwise command it straight back."""
+        arm_joint_pos = np.asarray(arm_joint_pos, dtype=np.float64)
+        arm_joint_idxes = self.body_config_list[0].arm_joint_idxes
+        low = self.action_space.low[arm_joint_idxes]
+        high = self.action_space.high[arm_joint_idxes]
+        if arm_joint_pos.shape != (len(arm_joint_idxes),):
+            raise ValueError(
+                f"[{self.__class__.__name__}] move_to_joint_pos needs "
+                f"{len(arm_joint_idxes)} arm joint values: {arm_joint_pos}"
+            )
+        # A target outside the joint range would fault the controller; refuse
+        # it loudly instead of silently clipping to a different pose.
+        tolerance = np.deg2rad(0.5)
+        if np.any(arm_joint_pos < low - tolerance) or np.any(
+            arm_joint_pos > high + tolerance
+        ):
+            raise ValueError(
+                f"[{self.__class__.__name__}] move_to_joint_pos target outside the "
+                f"joint range: {np.rad2deg(arm_joint_pos).round(1).tolist()} deg"
+            )
+        arm_joint_pos = np.clip(arm_joint_pos, low, high)
+
+        if self.observe_only:
+            print(
+                f"[{self.__class__.__name__}] OBSERVE-ONLY MODE: would move to "
+                f"{np.rad2deg(arm_joint_pos).round(1).tolist()} deg."
+            )
+            return
+
         self._filtered_arm_joint_pos_command = None
         # The arm is about to be moved by MoveJ, outside the ServoJ command
         # stream, so any previous anchor is stale -- see _reset_robot().
@@ -500,61 +567,63 @@ class RealFairino5EnvBase(RealEnvBase):
         # previous sent-command anchor is stale.
         self._last_sent_arm_joint_pos_deg = None
 
-        # Open the gripper BEFORE moving the arm, not after: if the gripper was
-        # left closed around something from a previous session, moving the arm
-        # first would drag/crush whatever it's holding. Independent of
-        # init_qpos's gripper value (which is also sent again after the move,
-        # below) so this happens even if init_qpos's gripper component is ever
-        # non-zero for some env variant.
-        print(f"[{self.__class__.__name__}] Opening gripper before moving the arm.")
         if self.dry_run:
-            print(f"[{self.__class__.__name__}] [DRY RUN] Would open gripper.")
-        else:
-            self._send_gripper_command(0.0)
+            print(
+                f"[{self.__class__.__name__}] [DRY RUN] Would move to: "
+                f"{list(np.rad2deg(arm_joint_pos))} deg"
+            )
+            self.arm_joint_pos_actual = arm_joint_pos.copy()
+            return
+
+        # ServoJ is a high-frequency streaming command: it expects to be called
+        # repeatedly with small incremental targets, and interprets a single
+        # large joint delta as needing to be reached almost instantly, which
+        # trips the controller's axis speed limit ("The command speed in the
+        # joint space of axis 1 exceeds the limit"). For a (potentially large)
+        # one-shot move, use the blocking point-to-point MoveJ command
+        # instead, then re-enter servo mode for the streaming control loop.
+        arm_joint_pos_command_deg = [float(x) for x in np.rad2deg(arm_joint_pos)]
+        self._check_fr_code(self.robot.ServoMoveEnd())
+        self._check_fr_code(
+            self.robot.MoveJ(arm_joint_pos_command_deg, tool=0, user=0, vel=float(vel))
+        )
+        self._start_servo_mode()
+
+        fr_code, measured_arm_joint_pos = self.robot.GetActualJointPosRadian()
+        self._check_fr_code(fr_code)
+        self.arm_joint_pos_actual = np.array(measured_arm_joint_pos)
+
+    # How long set_gripper_blocking() waits after commanding the gripper [s].
+    # The IAI tool_do gripper has no completion signal; its full stroke takes
+    # well under this.
+    GRIPPER_BLOCKING_SETTLE_SEC = 0.8
+
+    def set_gripper_blocking(self, close, settle_sec=None):
+        """Open (close=False) or close the gripper and wait for it to finish.
+        Returns the percent-closed value commanded, which the caller must
+        also put into the motion manager's gripper command -- the next
+        env.step() sends that command and would otherwise undo this."""
+        if settle_sec is None:
+            settle_sec = self.GRIPPER_BLOCKING_SETTLE_SEC
+        gripper_percent_closed = 100.0 if close else 0.0
+
+        if self.observe_only:
+            print(
+                f"[{self.__class__.__name__}] OBSERVE-ONLY MODE: would "
+                f"{'close' if close else 'open'} the gripper."
+            )
+            return gripper_percent_closed
 
         if self.dry_run:
             print(
-                f"[{self.__class__.__name__}] [DRY RUN] Would move to reset pose: "
-                f"{list(np.rad2deg(self.init_qpos[self.body_config_list[0].arm_joint_idxes]))} deg"
+                f"[{self.__class__.__name__}] [DRY RUN] Would "
+                f"{'close' if close else 'open'} the gripper."
             )
-            self.arm_joint_pos_actual = np.array(
-                self.init_qpos[self.body_config_list[0].arm_joint_idxes]
-            )
+            self._last_gripper_closing = bool(close)
         else:
-            # ServoJ is a high-frequency streaming command: it expects to be called
-            # repeatedly with small incremental targets, and interprets a single
-            # large joint delta as needing to be reached almost instantly, which
-            # trips the controller's axis speed limit ("The command speed in the
-            # joint space of axis 1 exceeds the limit"). For the (potentially large)
-            # one-shot move to the reset pose, use the blocking point-to-point MoveJ
-            # command instead, then re-enter servo mode for the streaming teleop
-            # control loop.
-            arm_joint_pos_command_deg = [
-                float(x)
-                for x in np.rad2deg(
-                    self.init_qpos[self.body_config_list[0].arm_joint_idxes]
-                )
-            ]
-            self._check_fr_code(self.robot.ServoMoveEnd())
-            self._check_fr_code(
-                self.robot.MoveJ(arm_joint_pos_command_deg, tool=0, user=0, vel=10.0)
-            )
-            self._start_servo_mode()
-
-            fr_code, arm_joint_pos = self.robot.GetActualJointPosRadian()
-            self._check_fr_code(fr_code)
-            self.arm_joint_pos_actual = np.array(arm_joint_pos)
-
-            gripper_percent_closed = float(
-                self.init_qpos[self.body_config_list[0].gripper_joint_idxes][0]
-            )
             self._send_gripper_command(gripper_percent_closed)
-
-        self._motion_enabled = True
-
-        print(
-            f"[{self.__class__.__name__}] Finish moving the robot to the reset position."
-        )
+            time.sleep(settle_sec)
+        return gripper_percent_closed
 
     def _set_action(self, action, duration=None, joint_vel_limit_scale=0.5, wait=False):
         start_time = time.time()
@@ -651,6 +720,12 @@ class RealFairino5EnvBase(RealEnvBase):
             print(f"  Gripper: {gripper_percent_closed:.1f}% closed")
             # Update arm position in dry-run mode for FK
             self.arm_joint_pos_actual = np.deg2rad(arm_joint_pos_command_deg)
+            # Track the commanded gripper state as a real tool_do gripper
+            # would (see _get_obs), so dry runs can exercise logic that waits
+            # for the gripper to close/open.
+            self._last_gripper_closing = (
+                gripper_percent_closed >= self.tool_do_close_threshold
+            )
         else:
             # cmdT tells the controller's interpolator how much time it has to reach
             # the target. The teleop loop's actual call rate is NOT a stable self.dt:
@@ -709,7 +784,15 @@ class RealFairino5EnvBase(RealEnvBase):
             # In dry-run mode, return mock observation based on last commanded position
             arm_joint_pos = self.arm_joint_pos_actual.astype(np.float64)
             arm_joint_vel = np.zeros(6, dtype=np.float64)
-            gripper_joint_pos = np.array([50.0], dtype=np.float64)  # Mock: 50% closed
+            # Mock: 50% closed until the first gripper command, then the
+            # commanded binary state (as the real tool_do branch reports it).
+            if self._last_gripper_closing is None:
+                gripper_percent_closed = 50.0
+            else:
+                gripper_percent_closed = (
+                    self.tool_do_closed_percent if self._last_gripper_closing else 0.0
+                )
+            gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
             gripper_joint_vel = np.zeros(1)
         else:
             # Get state from Fairino arm, falling back to the last known joint

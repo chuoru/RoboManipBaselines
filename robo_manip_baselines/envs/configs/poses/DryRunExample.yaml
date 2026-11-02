@@ -1,0 +1,9 @@
+# Example poses for trying the segment runner and --pre_segments in dry run
+# (envs/configs/RealFairino5DemoEnv_SpaceMouse_DryRun.yaml): small offsets
+# from the FR5 ready pose. NOT for the real arm.
+unit: deg
+poses:
+  home: init
+  carry: [-45.0, -93.0, -142.0, 56.0, 64.0, -1.0]
+  fixture_above: [-30.0, -93.0, -142.0, 56.0, 64.0, -1.0]
+  fixture_grasp: [-30.0, -96.0, -138.0, 55.0, 64.0, -1.0]
