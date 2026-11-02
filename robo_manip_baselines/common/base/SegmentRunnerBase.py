@@ -150,14 +150,26 @@ class WaitForOperatorPhase(SegmentPhaseBase):
         super().start()
         self.choice = None
         hold_at_measured(self.op, refresh_obs=False)
-        self.op.log(
+        msg = (
             f"STOPPED: {self.reason}. Fix the scene, then press SUCCESS to "
-            "restart the cycle."
+            "restart the cycle"
         )
+        if self.learned_phase is not None and self.op.can_intervene(self.learned_phase):
+            msg += (
+                f", or INTERVENE to do '{self.learned_phase.label}' with the SpaceMouse"
+            )
+        self.op.log(msg + ".")
 
     def handle_actions(self, actions):
         if "success" in actions:
             self.choice = "resume"
+        elif (
+            "intervene" in actions
+            and self.learned_phase is not None
+            and self.op.can_intervene(self.learned_phase)
+        ):
+            # Method B: do the segment by hand from its start pose.
+            self.choice = "intervene"
 
     def check_transition(self):
         return self.choice is not None
@@ -265,7 +277,18 @@ class CheckSegmentPhase(SegmentPhaseBase):
 
 class LearnedSegmentPhase(SegmentPhaseBase):
     """A learned segment: settle -> run the policy (or the operator, with
-    --replace_learned_with_teleop) until the end condition -> check -> result."""
+    --replace_learned_with_teleop) until the end condition -> check -> result.
+
+    Interventions (train mode, --enable_intervention; design D6'): INTERVENE
+    hands control to the SpaceMouse right where the policy is (method A) --
+    the device integrates on the last commanded target, so nothing jumps --
+    and INTERVENE again hands it back: if the end condition holds by then
+    (e.g. the operator closed the gripper) the segment ends as a success,
+    otherwise the policy resumes with a fresh action chunk. Method B is the
+    same from the stop pose after max_retries (start_with_intervention).
+    While a human is in control the policy keeps receiving observations
+    (observe()), the timeout does not run and the end condition is not
+    auto-detected."""
 
     # Settling before the first inference: the arm must be still (all joint
     # speeds below this [rad/s]) for SETTLE_STILL_TICKS consecutive ticks,
@@ -285,6 +308,8 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         self.max_retries = int(spec.get("max_retries", 2))
         self.on_fail_specs = spec.get("on_fail", [])
         self.teleop_only = policy_runner is None
+        # Set by the runner for method B; consumed when the run starts.
+        self.start_with_intervention = False
         self.checker = None
         if spec.get("check") is not None:
             self.checker = GripperCheck(
@@ -296,11 +321,18 @@ class LearnedSegmentPhase(SegmentPhaseBase):
 
     @property
     def display_name(self):
+        if self.is_intervening:
+            return f"{self.label} [INTERVENTION]"
         return f"{self.label} [{self.state}]"
 
     @property
     def is_recording_state(self):
         return self.state == "run"
+
+    @property
+    def is_intervening(self):
+        """A human has taken over from a policy (not a teleop-only segment)."""
+        return self.human_control and not self.teleop_only
 
     def start(self):
         super().start()
@@ -314,6 +346,10 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         self.run_time = 0.0
         self.last_tick_time = None
         self.human_control = self.teleop_only
+        self.num_interventions = 0
+        self.intervention_time = 0.0
+        self.intervention_start_time = None
+        self.intervention_methods = []
         hold_at_measured(self.op, refresh_obs=False)
 
     # ---- per tick -------------------------------------------------------
@@ -337,7 +373,10 @@ class LearnedSegmentPhase(SegmentPhaseBase):
                 # Only time under policy control counts toward timeout_s.
                 self.run_time += now - self.last_tick_time
             self.last_tick_time = now
-            if self._is_done():
+            if self.is_intervening:
+                # The operator ends an intervention explicitly (INTERVENE).
+                pass
+            elif self._is_done():
                 self.op.log(
                     f"[{self.label}] End condition '{self.done_condition}' met."
                 )
@@ -376,22 +415,27 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         self.state = "run"
         self.last_tick_time = None
         self.op.start_segment_recording(self)
+        if self.start_with_intervention and self.policy_runner is not None:
+            self.start_with_intervention = False
+            self.start_intervention("B")
         who = "operator" if self.human_control else "policy"
         self.op.log(f"[{self.label}] Start ({who} in control).")
 
-    def _is_done(self):
+    def _done_condition_now(self):
         gripper = get_measured_gripper(self.op)
         threshold = get_gripper_close_threshold(self.op)
         if self.done_condition == "gripper_closed_for_ticks":
-            condition = gripper >= threshold
+            return gripper >= threshold
         elif self.done_condition == "gripper_opened_for_ticks":
-            condition = gripper < threshold
+            return gripper < threshold
         elif self.done_condition == "success_pedal":
             return False
-        else:
-            raise ValueError(
-                f"[{self.__class__.__name__}] Invalid done condition: {self.done_condition}"
-            )
+        raise ValueError(
+            f"[{self.__class__.__name__}] Invalid done condition: {self.done_condition}"
+        )
+
+    def _is_done(self):
+        condition = self._done_condition_now()
         self.done_count = self.done_count + 1 if condition else 0
         return self.done_count >= self.done_ticks
 
@@ -403,6 +447,44 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         elif "success" in actions and self.op.args.mode != "exhibit":
             self.op.log(f"[{self.label}] Marked as success by the operator.")
             self.end_run(check=False)
+        elif "intervene" in actions and self.op.can_intervene(self):
+            if self.is_intervening:
+                self.end_intervention()
+            else:
+                self.start_intervention("A")
+
+    def start_intervention(self, method):
+        """Hand control to the SpaceMouse from where the policy is now: the
+        device integrates on the IK target, which is still the last
+        commanded pose, so the command does not jump."""
+        self.human_control = True
+        self.num_interventions += 1
+        self.intervention_methods.append(method)
+        self.intervention_start_time = time.time()
+        self.op.reset_teleop_device()
+        self.op.log(f"[{self.label}] INTERVENTION start (method {method}).")
+        self.op.on_intervention_start(self)
+
+    def _close_intervention_time(self):
+        if self.intervention_start_time is not None:
+            self.intervention_time += time.time() - self.intervention_start_time
+            self.intervention_start_time = None
+
+    def end_intervention(self):
+        self._close_intervention_time()
+        self.human_control = False
+        self.done_count = 0
+        self.op.on_intervention_end(self)
+        if self._done_condition_now():
+            self.op.log(
+                f"[{self.label}] INTERVENTION end: end condition met -> segment done."
+            )
+            self.end_run()
+        else:
+            self.op.log(f"[{self.label}] INTERVENTION end: policy resumes.")
+            # The observation history is current (observe()); the chunk
+            # planned before the human moved the arm is not.
+            self.policy_runner.reset_action_buffers(self.op)
 
     def stop_control(self):
         # Learned -> scripted (D5): drop the rest of the chunk, hold here.
@@ -423,6 +505,8 @@ class LearnedSegmentPhase(SegmentPhaseBase):
             self.finish("success")
 
     def finish(self, result, fail_reason=None):
+        self._close_intervention_time()
+        self.human_control = self.teleop_only
         self.state = "done"
         self.result = result
         self.fail_reason = fail_reason
@@ -509,6 +593,28 @@ class SegmentRunnerBase(OperationDataMixin):
             help="drive every learned segment with the SpaceMouse instead of a "
             "policy (end condition or SUCCESS ends it) -- to try the whole "
             "cycle before any policy exists",
+        )
+        parser.add_argument(
+            "--enable_intervention",
+            action="store_true",
+            help="train mode: INTERVENE (middle pedal / 'i') takes over a learned "
+            "segment with the SpaceMouse and hands it back; at a stop after "
+            "max_retries it starts the segment under operator control",
+        )
+        parser.add_argument(
+            "--intervention_mode",
+            type=str,
+            default="takeover",
+            choices=["takeover"],
+            help="how the operator's input is applied: takeover (the policy is "
+            "paused). 'residual' (policy + correction) is reserved for later.",
+        )
+        parser.add_argument(
+            "--intervention_input_threshold",
+            type=float,
+            default=0.05,
+            help="SpaceMouse input norm above which the operator counts as "
+            "actively correcting (intervention_input_active)",
         )
         parser.add_argument(
             "--skip_checks",
@@ -616,6 +722,9 @@ class SegmentRunnerBase(OperationDataMixin):
             parser.error(
                 "--replace_learned_with_teleop is not allowed with --mode exhibit"
             )
+        if self.args.mode == "exhibit" and self.args.enable_intervention:
+            # Nobody holds the SpaceMouse at the exhibition.
+            parser.error("--enable_intervention is not allowed with --mode exhibit")
 
     def set_additional_args(self, parser):
         pass
@@ -833,7 +942,26 @@ class SegmentRunnerBase(OperationDataMixin):
         return debounced
 
     def needs_teleop_device(self):
-        return self.args.replace_learned_with_teleop
+        return self.args.replace_learned_with_teleop or self.args.enable_intervention
+
+    def can_intervene(self, phase):
+        return (
+            self.args.enable_intervention
+            and self.is_action_enabled("intervene")
+            and phase.policy_runner is not None
+            and self.teleop_device is not None
+        )
+
+    # Hooks for later extensions (rewind before handing over, residual
+    # corrections, learned failure detectors). No-ops here.
+    def on_intervention_start(self, phase):
+        pass
+
+    def on_intervention_end(self, phase):
+        pass
+
+    def on_segment_fail(self, phase, reason):
+        pass
 
     def setup_teleop_device(self):
         self.teleop_device = None
@@ -1006,8 +1134,26 @@ class SegmentRunnerBase(OperationDataMixin):
 
     def on_learned_done(self, phase):
         name = phase.label
-        self.segment_record(name)["attempts"] += 1
-        self.segment_stat(name)["attempts"] += 1
+        record = self.segment_record(name)
+        stat = self.segment_stat(name)
+        record["attempts"] += 1
+        stat["attempts"] += 1
+        if phase.num_interventions > 0 and not phase.teleop_only:
+            record["interventions"] = (
+                record.get("interventions", 0) + phase.num_interventions
+            )
+            record["intervention_time"] = round(
+                record.get("intervention_time", 0.0) + phase.intervention_time, 2
+            )
+            stat["attempts_with_intervention"] = (
+                stat.get("attempts_with_intervention", 0) + 1
+            )
+            stat["interventions"] = (
+                stat.get("interventions", 0) + phase.num_interventions
+            )
+            stat["intervention_time"] = round(
+                stat.get("intervention_time", 0.0) + phase.intervention_time, 2
+            )
         episode = self.take_segment_recording(phase)
         if phase.result == "success":
             if self.dependent_checks.get(name):
@@ -1049,6 +1195,7 @@ class SegmentRunnerBase(OperationDataMixin):
         """Run the learned segment's on_fail steps, then retry it -- or, past
         max_retries, stop at its start pose and wait for the operator."""
         name = learned_phase.label
+        self.on_segment_fail(learned_phase, reason)
         self.retry_count[name] = self.retry_count.get(name, 0) + 1
         self.segment_idx = self.segment_phases.index(learned_phase)
         self.pending_phases = list(self.on_fail_phases[name])
@@ -1087,6 +1234,15 @@ class SegmentRunnerBase(OperationDataMixin):
         self.stats["stops"] += 1
         self.cycle_result["stopped"] = True
         self.cycle_result["stop_reason"] = phase.reason
+        if phase.choice == "intervene":
+            # Method B: continue this cycle with the segment under operator
+            # control, from the start pose the arm is waiting at.
+            learned = phase.learned_phase
+            self.retry_count[learned.label] = 0
+            self.segment_idx = self.segment_phases.index(learned)
+            self.pending_phases = []
+            learned.start_with_intervention = True
+            return
         self.finish_cycle()
         # Restart the cycle from the top; resume_phases (by default: open the
         # gripper, which the attendant is holding the cup from) first.
@@ -1169,7 +1325,27 @@ class SegmentRunnerBase(OperationDataMixin):
         )
 
     def record_extra_data(self):
-        """Per-step data beyond OperationDataMixin's: the finger-tag reading."""
+        """Per-step data beyond OperationDataMixin's: who was in control
+        (intervention, and whether the operator was actually moving the
+        device), and the finger-tag reading."""
+        phase = self.phase
+        intervention = bool(phase.human_control)
+        input_active = False
+        if intervention:
+            input_norm = getattr(self.teleop_device, "input_norm", None)
+            # A device that cannot tell (keyboard) counts as always active.
+            input_active = (
+                True
+                if input_norm is None
+                else input_norm() > self.args.intervention_input_threshold
+            )
+        self.data_manager.append_single_data(
+            DataKey.INTERVENTION, np.int8(intervention)
+        )
+        self.data_manager.append_single_data(
+            DataKey.INTERVENTION_INPUT_ACTIVE, np.int8(input_active)
+        )
+
         reading = None
         if hasattr(self.env.unwrapped, "get_gripper_marker_reading"):
             reading = self.env.unwrapped.get_gripper_marker_reading()
@@ -1230,6 +1406,10 @@ class SegmentRunnerBase(OperationDataMixin):
             "iteration": self.args.iteration,
             "segment_mode": self.args.mode,
             "teleop_only": bool(phase.teleop_only),
+            "num_interventions": int(phase.num_interventions),
+            "intervention_time": float(round(phase.intervention_time, 3)),
+            "intervention_methods": ",".join(phase.intervention_methods),
+            "intervention_mode": self.args.intervention_mode,
         }
 
     def get_segment_filename(self, name, cycle_idx, retry_idx, result):
@@ -1452,6 +1632,21 @@ class SegmentRunnerBase(OperationDataMixin):
 
     def draw_overlay(self, canvas):
         """Banners on the camera image (stop / intervention)."""
+        if getattr(self.phase, "is_intervening", False):
+            width = canvas.shape[1]
+            border = max(width // 80, 6)
+            red = np.array([230, 0, 0], dtype=np.uint8)
+            canvas[:border] = red
+            canvas[-border:] = red
+            canvas[:, :border] = red
+            canvas[:, -border:] = red
+            draw_text(
+                canvas,
+                "INTERVENTION",
+                (border + 10, border + 6),
+                size=40,
+                color=(230, 0, 0),
+            )
         if isinstance(self.phase, WaitForOperatorPhase):
             height, width = canvas.shape[:2]
             canvas[: height // 3] = (

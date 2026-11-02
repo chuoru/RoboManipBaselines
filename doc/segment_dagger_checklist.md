@@ -52,6 +52,16 @@
 - [ ] 1時間ほど動かしてメモリが増え続けない（結果 YAML の各サイクルの `memory_available_gb`）
 - [ ] 展示モードの記録が `dataset/CupPickPlace_<区間>_rollout_iterNNN/` に `_success` / `_failure` 付きで保存される
 
+## M5. 介入（準備モード）
+
+- [ ] `--enable_intervention` で、学習区間の実行中に中ペダルを踏むとその場から SpaceMouse 操作に切り替わり、アームが跳ねない（`command_log` の `max_abs_sent_vs_measured_deg` が 6 度以下）
+- [ ] 介入中に grasp を完了（グリッパを閉じる）→ 中ペダル → 判定（grasp_check）→ 次の区間へ
+- [ ] 介入を途中で終える → policy が自然に再開する（跳ねない、古い行動チャンクを実行しない）
+- [ ] リトライ上限で止まったときの中ペダル（方法 B）で、開始姿勢から操作できる
+- [ ] 介入時の SpaceMouse の操作感（5 Hz ループ、速度指定）が十分か。粗い場合は `--control_period 0.1`（+ 学習データを 10 Hz に再サンプリングして学習し直す）を試し、運用する周期をここに書く: 
+- [ ] 記録された試行の `intervention` / `intervention_input_active` が操作と合っている（`python ./misc/VisualizeData.py <rmb>` 等）
+- [ ] Esc / Ctrl+C の挙動が変わっていない
+
 ## M7. 展示モードでの連続稼働試験（最終確認）
 
 - [ ] 展示会と同じ設置（照明・背景・テーブル・カップ・印）にした

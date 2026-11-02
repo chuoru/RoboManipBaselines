@@ -11,6 +11,7 @@ import types
 import unittest
 from unittest import mock
 
+import numpy as np
 import yaml
 
 if "fairino" not in sys.modules:
@@ -72,6 +73,43 @@ class FakeOperator:
             gripper = self.arm_manager.get_command_gripper_joint_pos().copy()
             gripper[:] = 0.0 if gripper[0] >= 50 else 100.0
             self.arm_manager.set_command_gripper_joint_pos(gripper)
+
+
+class FakePolicyRunner:
+    """Policy stand-in: does not move; optionally flips the gripper command
+    after `toggle_after` inference ticks."""
+
+    def __init__(self, op, toggle_after=None):
+        self.op = op
+        self.toggle_after = toggle_after
+        self.calls = []
+        self.ticks = 0
+        self.checkpoint = "fake.ckpt"
+
+    def reset_buffers(self, op):
+        self.calls.append("reset_buffers")
+        self.ticks = 0
+
+    def reset_action_buffers(self, op):
+        self.calls.append("reset_action_buffers")
+
+    def observe(self, op):
+        self.calls.append("observe")
+
+    def infer_and_command(self, op):
+        self.calls.append("infer")
+        self.ticks += 1
+        if self.toggle_after is not None and self.ticks == self.toggle_after:
+            arm_manager = op.motion_manager.body_manager_list[0]
+            gripper = arm_manager.get_command_gripper_joint_pos().copy()
+            gripper[:] = 0.0 if gripper[0] >= 50 else 100.0
+            arm_manager.set_command_gripper_joint_pos(gripper)
+
+    def hold_current_command(self, op):
+        self.calls.append("hold")
+
+    def close(self):
+        pass
 
 
 class FakeTracker:
@@ -148,7 +186,11 @@ class TestSegmentRunner(unittest.TestCase):
         tweak_task=None,
         operator_kwargs=None,
         on_tick=None,
+        policies=None,
     ):
+        """policies: None = every learned segment driven by the (fake)
+        operator; else {segment: FakePolicyRunner kwargs} with fake policies
+        and --enable_intervention."""
         task = yaml.safe_load(yaml.safe_dump(self.task))
         if tweak_task is not None:
             tweak_task(task)
@@ -156,6 +198,12 @@ class TestSegmentRunner(unittest.TestCase):
         with open(task_path, "w") as f:
             yaml.safe_dump(task, f)
         tracker = FakeTracker(outcomes)
+        self.fake_policies = {}
+
+        def make_fake_policy(segment_name, checkpoint, op, **_):
+            runner = FakePolicyRunner(op, **policies.get(segment_name, {}))
+            self.fake_policies[segment_name] = runner
+            return runner
 
         class Runner(OperationRealFairino5Demo, SegmentRunnerBase):
             def setup_teleop_device(self):
@@ -164,6 +212,9 @@ class TestSegmentRunner(unittest.TestCase):
                 )
 
             def setup_checks(self):
+                real_tracker = self.env.unwrapped.gripper_marker_tracker
+                if real_tracker is not None:
+                    real_tracker.stop()
                 self.env.unwrapped.gripper_marker_tracker = tracker
                 super().setup_checks()
 
@@ -181,11 +232,21 @@ class TestSegmentRunner(unittest.TestCase):
                 return ord(key_queue.pop(0)[1])
             return -1
 
+        if policies is None:
+            mode_args = ["--replace_learned_with_teleop"]
+        else:
+            # Any existing file passes the checkpoint existence check.
+            mode_args = [
+                "--enable_intervention",
+                "--checkpoint",
+                f"grasp={task_path}",
+                f"place={task_path}",
+            ]
         argv = [
             "RolloutSegments.py",
             "--task",
             task_path,
-            "--replace_learned_with_teleop",
+            *mode_args,
             "--no_pedal",
             "--control_period",
             "0.0",
@@ -194,16 +255,43 @@ class TestSegmentRunner(unittest.TestCase):
             self.dataset_dir,
             *extra_args,
         ]
-        with (
-            mock.patch.object(sys, "argv", argv),
-            mock.patch.object(cv2, "imshow"),
-            mock.patch.object(cv2, "waitKey", side_effect=wait_key),
-            mock.patch("builtins.print"),
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            cv2, "imshow"
+        ), mock.patch.object(cv2, "waitKey", side_effect=wait_key), mock.patch(
+            "builtins.print"
+        ), mock.patch(
+            "robo_manip_baselines.common.base.SegmentRunnerBase.make_policy_runner",
+            side_effect=make_fake_policy,
         ):
             runner = Runner(**self.env_config)
             state["runner"] = runner
             runner.run()
         return runner, tracker
+
+    @staticmethod
+    def in_run(name, min_ticks=0):
+        """Key condition: segment `name` has been running for min_ticks."""
+
+        def condition(runner):
+            phase = runner.phase
+            return (
+                getattr(phase, "label", None) == name
+                and getattr(phase, "state", None) == "run"
+                and len(runner.data_manager.all_data_seq.get(DataKey.TIME, []))
+                >= min_ticks
+            )
+
+        return condition
+
+    @staticmethod
+    def intervening(name, flag=True):
+        def condition(runner):
+            phase = runner.phase
+            return getattr(phase, "label", None) == name and (
+                getattr(phase, "is_intervening", False) == flag
+            )
+
+        return condition
 
     @staticmethod
     def start_key():
@@ -368,6 +456,124 @@ class TestSegmentRunner(unittest.TestCase):
         runner.args.mode = "train"
         runner._last_action_time = {}
         self.assertEqual(runner.poll_actions(), {"fail", "intervene", "success"})
+
+    def grasp_episode(self, suffix="_success.rmb"):
+        paths = [
+            p
+            for p in find_rmb_files(self.dataset_dir)
+            if "_grasp_" in os.path.basename(p) and p.endswith(suffix)
+        ]
+        self.assertEqual(len(paths), 1, paths)
+        with RmbData(paths[0]) as rmb_data:
+            self.last_command_eef_pose = rmb_data[DataKey.COMMAND_EEF_POSE][:]
+            return (
+                dict(rmb_data.attrs),
+                rmb_data[DataKey.INTERVENTION][:].tolist(),
+                rmb_data[DataKey.INTERVENTION_INPUT_ACTIVE][:].tolist(),
+            )
+
+    def assert_no_command_jump(self, max_step_m=0.005):
+        # Taking over / handing back must not move the commanded target by
+        # more than one SpaceMouse step (the fake operator moves 3 mm/tick,
+        # the fake policy not at all).
+        steps = np.linalg.norm(
+            np.diff(self.last_command_eef_pose[:, :3], axis=0), axis=1
+        )
+        self.assertLess(steps.max(), max_step_m)
+
+    def operator_ticks(self, name, min_ticks):
+        # Presses of the same action closer than ACTION_DEBOUNCE_SEC (0.3 s)
+        # count once; a dry-run tick takes >= 20 ms, so keep min_ticks >= 20.
+        def condition(runner):
+            return (
+                self.intervening(name)(runner) and runner.teleop_device.t >= min_ticks
+            )
+
+        return condition
+
+    def test_intervention_ends_the_segment(self):
+        # Method A: take over mid-grasp, close the gripper, hand back -> done.
+        runner, tracker = self.run_runner(
+            ["grasped", "grasped", "released"],
+            ["--num_cycles", "1"],
+            keys=[
+                self.start_key(),
+                (self.in_run("grasp", 3), "i"),
+                (self.operator_ticks("grasp", 25), "i"),
+            ],
+            policies={"grasp": {}, "place": {"toggle_after": 3}},
+        )
+        self.assertEqual(runner.stats["cycles_without_stop"], 1)
+        calls = self.fake_policies["grasp"].calls
+        self.assertIn("observe", calls)
+        self.assertNotIn("reset_action_buffers", calls)
+        # No inference while the human was in control.
+        first_observe = calls.index("observe")
+        last_observe = len(calls) - 1 - calls[::-1].index("observe")
+        self.assertNotIn("infer", calls[first_observe:last_observe])
+        attrs, intervention, input_active = self.grasp_episode()
+        self.assertEqual(attrs["num_interventions"], 1)
+        self.assertEqual(attrs["intervention_methods"], "A")
+        self.assertGreater(attrs["intervention_time"], 0.0)
+        self.assertEqual(intervention[:3], [0, 0, 0])
+        self.assertEqual(intervention[-1], 1)
+        self.assertEqual(input_active, intervention)  # FakeOperator always moving
+        self.assert_no_command_jump()
+        self.assertEqual(runner.segment_stats["grasp"]["interventions"], 1)
+
+    def test_intervention_hands_back_to_the_policy(self):
+        runner, tracker = self.run_runner(
+            ["grasped", "grasped", "released"],
+            ["--num_cycles", "1"],
+            keys=[
+                self.start_key(),
+                (self.in_run("grasp", 3), "i"),
+                (self.operator_ticks("grasp", 25), "i"),
+            ],
+            operator_kwargs={"toggle_tick": 1000},
+            policies={"grasp": {"toggle_after": 8}, "place": {"toggle_after": 3}},
+        )
+        calls = self.fake_policies["grasp"].calls
+        self.assertIn("reset_action_buffers", calls)
+        self.assertIn("infer", calls[calls.index("reset_action_buffers") :])
+        attrs, intervention, _ = self.grasp_episode()
+        self.assertEqual(attrs["num_interventions"], 1)
+        self.assertEqual(intervention[-1], 0)  # the policy finished the segment
+        self.assertIn(1, intervention)
+        self.assert_no_command_jump()
+
+    def test_method_b_after_max_retries(self):
+        def tweak(task):
+            for spec in task["segments"]:
+                if spec["name"] == "grasp":
+                    spec["timeout_s"] = 0.05
+                    spec["max_retries"] = 0
+
+        runner, tracker = self.run_runner(
+            ["grasped", "grasped", "released"],
+            ["--num_cycles", "1"],
+            keys=[
+                self.start_key(),
+                (lambda runner: isinstance(runner.phase, WaitForOperatorPhase), "i"),
+                (self.operator_ticks("grasp", 25), "i"),
+            ],
+            tweak_task=tweak,
+            policies={"grasp": {}, "place": {"toggle_after": 3}},
+        )
+        self.assertEqual(runner.stats["stops"], 1)
+        self.assertEqual(runner.stats["cycles"], 1)
+        self.assertTrue(runner.cycle_results[0]["stopped"])
+        stat = runner.segment_stats["grasp"]
+        self.assertEqual(stat["attempts"], 2)
+        self.assertEqual(stat["fail_reasons"], {"timeout": 1})
+        attrs, intervention, _ = self.grasp_episode()
+        self.assertEqual(attrs["intervention_methods"], "B")
+        self.assertTrue(all(flag == 1 for flag in intervention))
+        self.assertEqual(runner.segment_stats["place"]["success_first_try"], 1)
+
+    def test_intervention_not_allowed_in_exhibit_mode(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            self.run_runner([], ["--mode", "exhibit"], policies={})
 
 
 if __name__ == "__main__":

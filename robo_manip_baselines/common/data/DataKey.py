@@ -80,6 +80,11 @@ class DataKey:
     MEASURED_GRIPPER_MARKER_WIDTH = "measured_gripper_marker_width"
     # 1 if the latest camera frame had the finger tags, else 0.
     GRIPPER_MARKER_DETECTED = "gripper_marker_detected"
+    # 1 while a human (SpaceMouse) was in control of a learned segment.
+    INTERVENTION = "intervention"
+    # 1 while the human was actually moving the device (input norm above a
+    # threshold) -- 0 during the reaction delay right after taking over.
+    INTERVENTION_INPUT_ACTIVE = "intervention_input_active"
 
     # All keys of measured data
     MEASURED_DATA_KEYS = [

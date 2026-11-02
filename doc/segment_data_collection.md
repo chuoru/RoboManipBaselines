@@ -139,3 +139,22 @@ $ python ./bin/RolloutSegments.py RealFairino5Demo \
 policy ができる前に通しを試すには `--replace_learned_with_teleop`（学習区間を SpaceMouse 操作に置き換える）を付けます。
 
 M3 の完了条件: grasp・place それぞれ 20 試行中 16 回以上成功し、通しのサイクルが動くこと。
+
+## 7. 介入（準備モード、HG-DAgger 用のデータ集め）
+
+```console
+$ python ./bin/RolloutSegments.py RealFairino5Demo \
+    --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
+    --task ./envs/configs/segments/CupPickPlace.yaml \
+    --enable_intervention --save_rollout --iteration 1
+```
+
+- **方法 A（基本）**: 学習区間の実行中、policy がずれ始めたら**早めに**中ペダル（INTERVENE、または `i`）。その場から SpaceMouse で操作できます（アームは退避しません）。画面は赤枠と "INTERVENTION"。
+  - もう一度中ペダルで介入終了。その時点でグリッパが区間の終了状態（grasp なら閉、place なら開）なら区間成功として次へ進み、そうでなければ policy に戻ります。
+  - 介入中は policy の推論もタイムアウトも止まり、終了条件の自動判定もしません（終了は必ず中ペダルで）。
+  - 同じペダルを 0.3 秒以内に2回踏んでも1回として扱います。
+- **方法 B（補助）**: リトライ上限で止まったとき、中ペダルを踏むとその区間を開始姿勢から SpaceMouse で行えます（右ペダルはこれまでどおりサイクルを最初から再開）。
+- 左ペダル（FAIL）で区間を失敗にしてリトライ、右ペダル（SUCCESS）で区間を成功として終了できます。
+- 記録: 学習区間の1回の試行ごとに `dataset/CupPickPlace_<区間>_rollout_iter001/` へ保存され、各ステップに `intervention`（人が操作中なら 1）と `intervention_input_active`（実際に SpaceMouse を動かしていれば 1）、属性に `num_interventions` / `intervention_time` / `intervention_methods` / `segment_result` などが入ります。
+- `--iteration N` は「このデータを使う学習の反復番号」です（iter000 の policy で集めたデータは `--iteration 1`）。
+- 展示モード（`--mode exhibit`）では介入できません。
