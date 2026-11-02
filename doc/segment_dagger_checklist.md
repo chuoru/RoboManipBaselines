@@ -6,8 +6,8 @@
 
 ## M1. SpaceMouse とペダル
 
-- [ ] SpaceMouse Compact が Windows で開ける（`device_params.device: "SpaceMouse Compact"`）。開けない場合: hidapi.dll の場所 / 3DxWare の停止 / `device_params: {}` を試し、必要だった手順を segment_data_collection.md §0-1 に書く
-- [ ] 3DxWare が動いたままでも、SpaceMouse の操作が OS のマウス操作として入らないか
+- [ ] SpaceMouse Compact が開ける（`device_params.device: "SpaceMouse Compact"`）。Linux は udev ルール（segment_data_collection.md §0-1）を入れて挿し直す
+- [ ] `python ./misc/CheckSpacemouse.py` で、手を離すと 0 のまま（ドリフトなし）、ボタン 2 つが効く
 - [ ] 軸の向きが直感どおりか（押す方向とアームの動く方向）。違えば `axis_sign` を直す
 - [ ] 速度（`max_lin_vel` 0.05 m/s, `max_ang_vel` 0.5 rad/s）とデッドゾーン（0.08）が操作しやすいか。手を置いただけでドリフトしないか
 - [ ] 左ボタンでグリッパが開閉し、右ボタンで精密モード（1/3 速度）が切り替わる

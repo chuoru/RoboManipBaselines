@@ -20,8 +20,18 @@
   - 左ボタン: グリッパの開閉（押すたびに切り替え）
   - 右ボタン: 精密モード（速度 1/3）の切り替え。位置合わせの最後に使う
   - 速度はループ周期に依存しない速度指定（`max_lin_vel` 0.05 m/s、`max_ang_vel` 0.5 rad/s）
-- Windows では `pyspacemouse` が `hidapi.dll` を必要とします（PATH か python.exe と同じフォルダに置く）。
-- 3Dconnexion 公式ドライバ（3DxWare）が常駐していると、デバイスを掴まれて開けない、または SpaceMouse の操作が OS のマウス操作としても入る場合があります。開けないときは 3DxWare を終了するか、python.exe に対して無効にしてください。**実機でどちらが必要だったかを、確認後この節に追記すること。**
+- Linux: 一般ユーザが `/dev/hidraw*` を読めるように、udev ルールを1回だけ追加し、SpaceMouse を挿し直します（`spacenavd` は不要。動いていると競合することがあるので止めておく）。
+  ```console
+  $ echo 'KERNEL=="hidraw*", ATTRS{idVendor}=="256f", MODE="0666"' | sudo tee /etc/udev/rules.d/99-spacemouse.rules
+  $ sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
+- Windows では `pyspacemouse` が `hidapi.dll` を必要とします（PATH か python.exe と同じフォルダに置く）。3Dconnexion 公式ドライバ（3DxWare）が常駐していると、デバイスを掴まれて開けない、または SpaceMouse の操作が OS のマウス操作としても入る場合があります。
+- アームにつなぐ前に `python ./misc/CheckSpacemouse.py` で確認します。表示されるのは、teleop と同じ処理を通したあとの、ベース座標系での指令速度です。手を離して 0 のままか（ドリフトしないか）、押した方向に対応する軸が動くか、左ボタンで gripper が 0 / 100 に切り替わるか、右ボタンで precision が切り替わるかを見ます。
+
+このブランチを worktree で使う場合は、venv が既定で読む本体の checkout ではなく、このブランチのコードが読み込まれるように、PYTHONPATH を設定してから実行します。
+```console
+$ export PYTHONPATH=/mnt/data/fairino_fr5/RoboManipBaselines_segment_dagger:/mnt/data/fairino_fr5/RoboManipBaselines/third_party/fairino-python-sdk/linux
+```
 
 ### 0-2. フットペダル
 1. `python ./misc/CheckPedalKeys.py` を起動し、左・中・右のペダルを順に踏んで、表示されるキー名を控えます。
