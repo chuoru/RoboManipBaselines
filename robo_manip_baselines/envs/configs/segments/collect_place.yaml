@@ -1,6 +1,5 @@
-# Demo collection for the "place" segment of CupPickPlace, method B
-# (doc/segment_data_collection.md): the cup is always picked from the same
-# fixture by a script, so it sits in the gripper the same way in every demo.
+# Demo collection for the "place" segment of CupPickPlace
+# (doc/segment_data_collection.md).
 #
 #   python ./bin/Teleop.py RealFairino5Demo \
 #     --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
@@ -9,23 +8,27 @@
 #     --pedal_config ./common/configs/pedal_default.yaml \
 #     --demo_name CupPickPlace_place_SM_iter000
 #
-# Each demo: (reset pose) -> home -> above the fixture -> down -> close ->
-# up -> carry -> [operator: put the cup on the coaster and open the gripper,
-# then INTERVENE ('n') right away] -> SUCCESS saves / FAIL discards ->
-# retreat up.
-# Put the cup back into the fixture and move the coaster before the next demo.
+# Each demo: (reset pose) -> home -> [unrecorded: grasp the cup wherever it
+# is and lift it, then INTERVENE] -> up -> carry -> [operator: put the cup
+# on the coaster and open the gripper, then INTERVENE ('n') right away] ->
+# SUCCESS saves / FAIL discards -> [unrecorded: push the coaster (with the
+# cup on it) somewhere else, then INTERVENE] -> retreat up.
+#
+# The cup is picked up by hand (SpaceMouse) rather than by a script from a
+# fixture: no fixture or fixture poses are needed, and the way the cup sits
+# in the gripper varies a little from demo to demo -- as it will in the
+# real task, where the learned grasp segment picks the cup up.
 segment: place
 poses: ../poses/CupPickPlace.yaml
 pre_segments:
   - {joint_pos: home}
-  - {joint_pos: fixture_above}
-  - {joint_pos: fixture_grasp, vel: 5}
-  - {gripper: close}
-  - {rel_xyz: [0, 0, 0.10]}
+  - {teleop: "grasp the cup and lift it"}
+  # Clearance above the table before the joint move to carry.
+  - {rel_xyz: [0, 0, 0.05]}
   # Same start pose as the place segment in CupPickPlace.yaml.
   - {joint_pos: carry}
 post_segments:
+  - {teleop: "push the coaster to a new place"}
   - {rel_xyz: [0, 0, 0.08]}
 # Finished by hand (INTERVENE) right after opening, not by
-# auto_finish_on: gripper_opened. Set rearrange_after_demo: true to put the
-# cup back into the fixture with the arm between demos.
+# auto_finish_on: gripper_opened.

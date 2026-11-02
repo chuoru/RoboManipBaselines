@@ -18,7 +18,7 @@
 
 ## M2. スクリプト動作と区間実行
 
-- [ ] `misc/RecordNamedPose.py` で `home` / `carry` / `fixture_above` / `fixture_grasp` を登録した
+- [ ] `misc/RecordNamedPose.py` で `home` / `carry` を登録した
 - [ ] 各姿勢間の MoveJ が安全（速度 `vel: 10`。周囲に当たらない）
 - [ ] `rel_xyz` の退避（IK + MoveJ）がほぼ真上に動く。横にずれる・回る場合は `mode: stream` を試す
 - [ ] `--replace_learned_with_teleop` で通しのサイクル（home → grasp(SpaceMouse) → 退避 → carry → place(SpaceMouse) → 退避 → home）が段差なく動く
@@ -29,7 +29,7 @@
 ## M3. デモ収集と初期学習
 
 - [ ] `collect_grasp.yaml`: home から開始 → 閉じて中ペダルで終了 → 保存/破棄 → 置き直し（記録なし、SpaceMouse でカップを別の場所へ）→ 中ペダル → グリッパが開いて上に退避
-- [ ] `collect_place.yaml`: 治具からスクリプトで掴み → carry → 置いて開き中ペダルで終了 → 退避。グリッパ内のカップの持ち方が毎回同じになる
+- [ ] `collect_place.yaml`: home → カップを SpaceMouse で掴む（記録なし）→ 5 cm 上 → carry（カップを落とさない）→ 置いて開き中ペダルで終了 → 印を押して動かす（記録なし）→ 退避
 - [ ] teleop の記録周期（`ResampleRmbData.py --check` で確認）が 5 Hz 以上ある（下回ると再サンプリングでフレームが重複する）
 - [ ] 背景マスク（0.6 m）がデモ中も効いている（記録映像を確認）
 - [ ] grasp・place 各約30本を収集（配置は想定範囲全体に均等）

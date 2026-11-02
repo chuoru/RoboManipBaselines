@@ -8,7 +8,7 @@ poses are written to a pose YAML (envs/configs/poses/<Task>.yaml) in degrees.
     python ./misc/RecordNamedPose.py \\
         --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \\
         --poses_file ./envs/configs/poses/CupPickPlace.yaml \\
-        --names home carry fixture_above fixture_grasp \\
+        --names home carry \\
         --input_device spacemouse
 
 Keys (OpenCV window): Enter/'s' = record, 'k' = skip this name, Esc = quit.

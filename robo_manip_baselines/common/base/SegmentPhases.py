@@ -11,6 +11,11 @@ specs:
     {rel_xyz: [0, 0, 0.08]}      move the end effector by [dx, dy, dz] [m]
                                  in the robot base frame, orientation kept
     {gripper: open}              open / close the gripper and wait
+    {teleop: "pick up the cup"}  unrecorded teleoperation with the op's input
+                                 devices until INTERVENE ('n'); the text is
+                                 shown on the screen. Demo collection only
+                                 (TeleopBase --pre_segments): set up the
+                                 scene or the gripper for the next demo.
 
 These phases work in any op that has env, motion_manager and obs (the
 segment runner, and TeleopBase for --pre_segments).
@@ -362,6 +367,37 @@ class GripperPhase(ScriptedPhaseBase):
         return self.get_elapsed_duration() >= self.duration
 
 
+class FreeTeleopPhase(ScriptedPhaseBase):
+    """Unrecorded teleoperation between scripted steps, ended by the 'n' key
+    (INTERVENE pedal). TeleopBase records only in its TeleopPhase, so nothing
+    done here ends up in a demo: it is for moving the object or the target
+    to a new place, or picking the object up, before the next demo."""
+
+    def start(self):
+        super().start()
+        for input_device in self.op.input_device_list:
+            # Connected here because this can run before StandbyTeleopPhase
+            # (which connects otherwise); connect() is a no-op if done.
+            input_device.connect()
+            # Forget the velocity-mode time stamp and filter state, so the
+            # first tick cannot jump by the time since the device was last
+            # used.
+            if hasattr(input_device, "reset_filter"):
+                input_device.reset_filter()
+        print(
+            f"[{self.op.__class__.__name__}] Not recording: {self.label}. "
+            "Press the 'n' key when done."
+        )
+
+    def pre_update(self):
+        for input_device in self.op.input_device_list:
+            input_device.read()
+            input_device.set_command_data()
+
+    def check_transition(self):
+        return self.op.key == ord("n")
+
+
 def make_primitive_phase(op, spec, named_poses, label=None):
     """One scripted phase from a primitive spec (see the module docstring).
     Also accepts a full segment entry ({name, type: scripted_move|gripper,
@@ -373,6 +409,18 @@ def make_primitive_phase(op, spec, named_poses, label=None):
         label = name
     if "joint_pos" in spec:
         pose_name = spec["joint_pos"]
+        # Refuse an unknown / unrecorded pose when the task is loaded rather
+        # than when the step is reached: by then the arm may be in the middle
+        # of the task (e.g. holding the cup).
+        if pose_name not in named_poses:
+            raise KeyError(
+                f"Unknown named pose '{pose_name}'. Known: {sorted(named_poses)}"
+            )
+        if named_poses[pose_name] is None:
+            raise ValueError(
+                f"Named pose '{pose_name}' is not recorded yet. Record it with "
+                "misc/RecordNamedPose.py before running."
+            )
         return JointMovePhase(
             op,
             label or f"move to {pose_name}",
@@ -401,4 +449,13 @@ def make_primitive_phase(op, spec, named_poses, label=None):
             close=(value == "close"),
             settle_sec=spec.get("settle_sec"),
         )
+    if "teleop" in spec:
+        # Checked on a class flag, not on input_device_list, because the
+        # collection steps are loaded before TeleopBase sets up its devices.
+        if not getattr(op, "SUPPORTS_TELEOP_STEPS", False):
+            raise ValueError(
+                f"'teleop' steps are for demo collection (Teleop.py "
+                f"--pre_segments) only: {spec}"
+            )
+        return FreeTeleopPhase(op, label or str(spec["teleop"]))
     raise ValueError(f"Invalid scripted step: {spec} (type: {seg_type})")

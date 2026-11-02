@@ -21,11 +21,14 @@ pre_segments:
 # reset moves the arm back home (moving home with the fingers around the cup
 # would drag it along).
 post_segments:
+  # Unrecorded: carry the cup somewhere else on the table and release it,
+  # for varied start positions without walking up to the table.
+  - {teleop: "move the cup elsewhere and release it"}
+  # Let go of the cup (if still held) and move up before the next reset
+  # moves the arm back home (moving home with the fingers around the cup
+  # would drag it along).
   - {gripper: open}
   - {rel_xyz: [0, 0, 0.08]}
-# Move the cup with the arm between demos, for varied start positions
-# without walking up to the table (TeleopBase RearrangeTeleopPhase).
-rearrange_after_demo: true
 # The demo is finished by hand (INTERVENE), not when the gripper closes:
 # auto_finish_on: gripper_closed would cut the demo at the first close,
 # which the operator may want to redo. Finish right after closing, so the

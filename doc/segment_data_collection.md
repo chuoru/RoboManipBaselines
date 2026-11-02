@@ -9,7 +9,7 @@
 [S] home へ MoveJ
 [L] grasp : カップに近づいて掴む       ← SpaceMouse でデモを集める（約30本）
 [S] 真上に退避 → carry へ MoveJ
-[L] place : 印の上に置いて離す         ← SpaceMouse でデモを集める（約30本、方法 B）
+[L] place : 印の上に置いて離す         ← SpaceMouse でデモを集める（約30本）
 [S] 真上に退避 → home へ
 ```
 
@@ -50,18 +50,17 @@ $ export PYTHONPATH=/mnt/data/fairino_fr5/RoboManipBaselines_segment_dagger:/mnt
 Esc（OpenCV ウィンドウ）で終了します。
 
 ### 0-3. 名前付き姿勢
-`envs/configs/poses/CupPickPlace.yaml` の `home` / `carry` / `fixture_above` / `fixture_grasp` を実機で登録します。未登録（`null`）の姿勢があると、収集も実行も起動時に止まります。
+`envs/configs/poses/CupPickPlace.yaml` の `home` / `carry` を実機で登録します。使う姿勢が未登録（`null`）だと、収集も実行も起動時に止まります（アームが動く前）。
 
 ```console
 $ python ./misc/RecordNamedPose.py --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
     --poses_file ./envs/configs/poses/CupPickPlace.yaml \
-    --names home carry fixture_above fixture_grasp --input_device spacemouse
+    --names home carry --input_device spacemouse
 ```
-SpaceMouse でアームを動かし、SUCCESS ペダル（または Enter / `s`）でその時点の関節角を記録します（`k` でスキップ）。
+SpaceMouse でアームを動かし、SUCCESS ペダル（右、または Enter / `s`）でその時点の関節角を記録します（`k` でスキップ）。
 
-- `home`: grasp の開始姿勢。カップが置かれうる範囲全体がハンドカメラに映る高さ
-- `carry`: place の開始姿勢。カップを持ったまま、印が置かれうる範囲全体が映る高さ
-- `fixture_above` / `fixture_grasp`: カップ置き場（治具）の真上と、指がカップを囲む高さ
+- `home`: grasp の開始姿勢。カップが置かれうる範囲全体がハンドカメラに映る姿勢（未登録の間は初期姿勢 `init`）
+- `carry`: place の開始姿勢。カップを持ったまま、印が置かれうる範囲全体が映る姿勢。テーブルから十分離れていること（カップを持ったまま MoveJ で入る）
 
 ### 0-4. env 設定
 収集にも実行にも `envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml` を使います。カメラ設定・背景マスク・TCP は `RealFairino5DemoEnv_UmiPolicy_BgMask_5Hz.yaml` と同じです。**この設定で集めたデータで学習した policy は、この設定で動かしてください**（グリッパの状態の表し方も含めて、学習時と同じ観測になるようにするため）。
@@ -93,14 +92,14 @@ $ python ./bin/Teleop.py RealFairino5Demo \
 2. 中ペダル（`n`）で SpaceMouse の操作と記録が同時に始まる（Teleop）
 3. SpaceMouse でカップに近づき、左ボタンでグリッパを閉じる → **閉じたらすぐ中ペダルで記録終了**（グリッパを閉じても自動では終わりません。掴み直したいときはそのまま開いてやり直せます）
 4. 右ペダル（保存）または左ペダル（破棄）
-5. **置き直し（記録なし）**: SpaceMouse でカップを持ったままテーブルの別の場所へ運び、左ボタンで離す。次のデモの開始位置を変えるための操作で、記録には入りません（画面のフェーズ表示は `RearrangeTeleop`）
+5. **置き直し（記録なし）**: SpaceMouse でカップを持ったままテーブルの別の場所へ運び、左ボタンで離す。次のデモの開始位置を変えるための操作で、記録には入りません（画面のフェーズ表示は `move the cup elsewhere and release it`）
 6. 中ペダル → グリッパが開き、8 cm 上に退避 → `home` → 次のエピソードへ
 
-置き直しは `collect_grasp.yaml` の `rearrange_after_demo: true` で有効になっています。カップの位置は、想定範囲全体（端も含めて）に散らばるようにしてください。
+置き直しは `collect_grasp.yaml` の `post_segments` の `{teleop: ...}` の行です（不要なら消す）。カップの位置は、想定範囲全体（端も含めて）に散らばるようにしてください。
 
 保存先: `dataset/CupPickPlace_grasp_SM_iter000_<日時>/`（セッションごとに1フォルダ。学習時にまとめて使います）
 
-## 3. place のデモ収集（方法 B: 固定の置き場から掴む）
+## 3. place のデモ収集
 
 ```console
 $ python ./bin/Teleop.py RealFairino5Demo \
@@ -111,13 +110,20 @@ $ python ./bin/Teleop.py RealFairino5Demo \
     --demo_name CupPickPlace_place_SM_iter000
 ```
 
-1回の流れ:
-1. カップを治具に置き、印をテーブルの別の場所に置く
-2. 中ペダル → `home` → 治具の上 → 下降 → 閉じる → 10 cm 上 → `carry`（スクリプト）
-3. 中ペダルで操作と記録を開始。印の上にカップを置き、左ボタンでグリッパを開く → **開いたらすぐ中ペダルで記録終了**（自動では終わりません）
-4. 右ペダル（保存）または左ペダル（破棄）→ 8 cm 上に退避
+1回の流れ（記録されるのは 4〜5 だけ）:
+1. 中ペダル → アームが初期姿勢 → `home`
+2. **カップを掴む（記録なし）**: SpaceMouse でテーブル上のカップ（前回置いた場所）を掴み、少し持ち上げる → 中ペダル
+3. スクリプトで 5 cm 上 → `carry` へ（カップを持ったまま）→ 待機
+4. 中ペダルで操作と記録を開始。印の上にカップを置き、左ボタンでグリッパを開く → **開いたらすぐ中ペダルで記録終了**（自動では終わりません）
+5. 右ペダル（保存）または左ペダル（破棄）
+6. **印を動かす（記録なし）**: SpaceMouse で指を下ろし、印（カップが載ったまま）を押して別の場所へずらす → 中ペダル
+7. 8 cm 上に退避 → 次のエピソードへ
 
-治具の位置を固定するのは、グリッパ内でのカップの持ち方を毎回揃えるためです。
+カップは毎回 SpaceMouse で掴むので、グリッパ内の持ち方は少しずつ変わります。本番では学習した grasp が掴んだカップを置くので、持ち方のばらつきがデモに含まれているほうが本番に近くなります。ただし、持ち方が極端にずれた（斜め・端だけ）ときは、2 で掴み直してください。
+
+印の位置は、想定範囲全体（端も含めて）に散らばるようにしてください。
+
+記録なしの操作は、収集設定の `{teleop: "..."}` の行です（`collect_place.yaml` の `pre_segments` / `post_segments`）。画面のフェーズ表示にその文言が出ます。
 
 ## 4. 良いデモの条件（両区間共通）
 
