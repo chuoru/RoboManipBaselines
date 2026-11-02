@@ -38,6 +38,10 @@ class SpacemouseInputDevice(InputDeviceBase):
         # tilted by accident.
         axis_sign=None,
         axis_enable=None,
+        # Per-axis speed factor, in AXIS_NAMES order, e.g. to slow down just
+        # the rotations that feel too fast. Applied on top of
+        # pos_scale/rpy_scale (or max_lin_vel/max_ang_vel).
+        axis_scale=None,
         # "world": rotation deltas are applied in the robot base frame (the
         # original behaviour). "tool": in the end-effector's own frame.
         # Only used with control_frame "world".
@@ -99,9 +103,16 @@ class SpacemouseInputDevice(InputDeviceBase):
             if axis_enable is None
             else np.array(axis_enable, dtype=np.float64)
         )
-        if self.axis_sign.shape != (6,) or self.axis_enable.shape != (6,):
+        self.axis_scale = (
+            np.ones(6) if axis_scale is None else np.array(axis_scale, dtype=np.float64)
+        )
+        if (
+            self.axis_sign.shape != (6,)
+            or self.axis_enable.shape != (6,)
+            or self.axis_scale.shape != (6,)
+        ):
             raise ValueError(
-                f"[{self.__class__.__name__}] axis_sign/axis_enable need 6 values "
+                f"[{self.__class__.__name__}] axis_sign/axis_enable/axis_scale need 6 values "
                 f"({', '.join(self.AXIS_NAMES)})."
             )
         if rotation_frame not in ("world", "tool"):
@@ -218,7 +229,7 @@ class SpacemouseInputDevice(InputDeviceBase):
         else:
             alpha = self.smoothing_alpha
             self._filtered_axes = alpha * raw + (1.0 - alpha) * self._filtered_axes
-        axes = self._filtered_axes * self.axis_sign * self.axis_enable
+        axes = self._filtered_axes * self.axis_sign * self.axis_enable * self.axis_scale
         self._last_axes = axes
         return axes
 

@@ -182,6 +182,14 @@ class TestSpacemouseInputDevice(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_axis_scale(self):
+        device, arm = make_device(rpy_scale=0.1, axis_scale=[1, 1, 1, 1, 1, 0.5])
+        device.state = make_state(yaw=1.0)
+        device.set_command_data()
+        np.testing.assert_allclose(
+            pin.log3(arm.target_se3.rotation), [0.0, 0.0, -0.1], atol=1e-12
+        )
+
     def test_tool_view_yaw(self):
         device, arm = make_device(
             control_frame="tool", pos_scale=0.1, tool_view_yaw_deg=90.0
