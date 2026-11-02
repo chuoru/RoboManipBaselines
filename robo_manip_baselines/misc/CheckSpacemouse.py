@@ -65,7 +65,9 @@ if __name__ == "__main__":
     # The dummy target starts at identity, so base and tool frame coincide
     # and the printed vectors are in the frame the config commands in.
     if device.control_frame == "tool":
-        frame = "tool frame (x: image right, y: image down, z: towards the scene)"
+        frame = (
+            "tool frame (x: image right, y: image down, z: forward along the fingers)"
+        )
     else:
         frame = "robot base frame"
     print(

@@ -8,7 +8,7 @@
 
 - [ ] SpaceMouse Compact が開ける（`device_params.device: "SpaceMouse Compact"`）。Linux は udev ルール（segment_data_collection.md §0-1）を入れて挿し直す
 - [ ] `python ./misc/CheckSpacemouse.py` で、手を離すと 0 のまま（ドリフトなし）、ボタン 2 つが効く
-- [ ] ハンドカメラの映像を見ながら、キャップの向きと映像の動きが一致する（右 = 映像の右、奥 = 映像の上、押し下げ = 前進）。ずれていれば `tool_view_yaw_deg`、1 軸だけ逆なら `axis_sign` を直す（値: ）
+- [ ] ハンドカメラの映像を見ながら、キャップの向きと映像の動きが一致する（前後 = 指の向きに前後、左右・上下 = 映像の左右・上下、ひねる = Yaw、左右に傾ける = Roll、前後に傾ける = Pitch）。ずれていれば `tool_view_yaw_deg`、1 軸だけ逆なら `axis_sign` を直す（値: ）
 - [ ] ひねる・傾けると指先を中心に回る（指先が振れない）。振れるなら `ik_eef_offset_pose` の z（現在 0.25 m = フランジ面 + 150 mm）を直す
 - [ ] 速度（`max_lin_vel` 0.05 m/s, `max_ang_vel` 0.5 rad/s）とデッドゾーン（0.08）が操作しやすいか。手を置いただけでドリフトしないか
 - [ ] 左ボタンでグリッパが開閉し、右ボタンで精密モード（1/3 速度）が切り替わる

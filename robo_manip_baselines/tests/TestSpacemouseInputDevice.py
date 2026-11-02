@@ -130,41 +130,57 @@ class TestSpacemouseInputDevice(unittest.TestCase):
 
     def test_tool_control_frame_translation_follows_the_view(self):
         device, arm = make_device(control_frame="tool", pos_scale=0.1)
-        rotation = pin.rpy.rpyToMatrix(np.pi, 0.0, np.pi / 2)  # pointing down
+        # fingers pointing horizontally along base +x, tool y (image down)
+        # pointing down: tool x = base -y, tool y = base -z, tool z = base +x
+        rotation = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
         arm.target_se3 = pin.SE3(rotation, np.array([0.3, 0.0, 0.2]))
-        # cap forward = image up = tool -y; right = tool +x; down = tool +z
-        for state, tool_dir in (
-            (make_state(y=1.0), [0.0, -1.0, 0.0]),
-            (make_state(x=1.0), [1.0, 0.0, 0.0]),
-            (make_state(z=-1.0), [0.0, 0.0, 1.0]),
+        # cap forward = TCP forward (tool +z), right = image right (tool +x),
+        # up = image up (tool -y)
+        for state, base_dir in (
+            (make_state(y=1.0), [1.0, 0.0, 0.0]),
+            (make_state(x=1.0), [0.0, -1.0, 0.0]),
+            (make_state(z=1.0), [0.0, 0.0, 1.0]),
         ):
             start = arm.target_se3.translation.copy()
             device.state = state
             device.set_command_data()
             np.testing.assert_allclose(
                 arm.target_se3.translation - start,
-                0.1 * rotation @ np.array(tool_dir),
+                0.1 * np.array(base_dir),
                 atol=1e-12,
             )
             np.testing.assert_allclose(arm.target_se3.rotation, rotation, atol=1e-12)
 
     def test_tool_control_frame_rotation_pivots_about_the_tcp(self):
-        device, arm = make_device(control_frame="tool", rpy_scale=0.1)
-        rotation = pin.rpy.rpyToMatrix(np.pi, 0.0, 0.0)
-        arm.target_se3 = pin.SE3(rotation, np.array([0.3, 0.1, 0.2]))
-        device.state = make_state(yaw=0.5)  # twist: about the view axis
-        device.set_command_data()
-        # the controlled point (TCP) stays put
-        np.testing.assert_allclose(arm.target_se3.translation, [0.3, 0.1, 0.2])
-        # world mode turns -2 * 0.5 * 0.1 about +z (up); the same twist turns
-        # the view the same way, i.e. about tool -z ... which is base +z here
-        expected = rotation @ pin.exp3(np.array([0.0, 0.0, 0.1]))
-        np.testing.assert_allclose(arm.target_se3.rotation, expected, atol=1e-12)
+        rotation = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+        # same signs as the world mapping, whose twist turns about base +z:
+        # twist = yaw about the TCP's up axis (tool -y = base +z here), tilt
+        # left/right = roll about the fingers (tool +z), tilt forward/back =
+        # pitch about the TCP's right axis (tool +x)
+        for state, tool_axis in (
+            (make_state(yaw=0.5), [0.0, 1.0, 0.0]),
+            (make_state(roll=1.0), [0.0, 0.0, 1.0]),
+            (make_state(pitch=-1.0), [1.0, 0.0, 0.0]),
+        ):
+            device, arm = make_device(control_frame="tool", rpy_scale=0.1)
+            arm.target_se3 = pin.SE3(rotation, np.array([0.3, 0.1, 0.2]))
+            device.state = state
+            device.set_command_data()
+            # the controlled point (TCP) stays put
+            np.testing.assert_allclose(arm.target_se3.translation, [0.3, 0.1, 0.2])
+            expected = rotation @ pin.exp3(0.1 * np.array(tool_axis))
+            np.testing.assert_allclose(arm.target_se3.rotation, expected, atol=1e-12)
+        # the twist turns the same way as in the world mapping when the TCP's
+        # up axis is the base +z
         world_device, world_arm = make_device(rpy_scale=0.1)
         world_arm.target_se3 = pin.SE3(rotation, np.zeros(3))
         world_device.state = make_state(yaw=0.5)
         world_device.set_command_data()
-        np.testing.assert_allclose(world_arm.target_se3.rotation, expected, atol=1e-12)
+        np.testing.assert_allclose(
+            world_arm.target_se3.rotation,
+            rotation @ pin.exp3(np.array([0.0, 0.1, 0.0])),
+            atol=1e-12,
+        )
 
     def test_tool_view_yaw(self):
         device, arm = make_device(

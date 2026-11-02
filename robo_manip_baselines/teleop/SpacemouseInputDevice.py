@@ -44,13 +44,14 @@ class SpacemouseInputDevice(InputDeviceBase):
         rotation_frame="world",
         # "world": the original mapping, translation in the robot base frame
         # (rotation per rotation_frame). "tool": translation AND rotation in
-        # the controlled point's own frame, mapped as if the cap were the
-        # hand camera seen from behind -- for an operator who watches the
-        # hand-camera image, assuming the camera looks along the tool +z axis:
-        # cap forward = image up (tool -y), cap right = image right (tool
-        # +x), cap pushed down = towards the scene (tool +z). Since the
-        # controlled point does not translate under a rotation, rotations
-        # pivot about it (set ik_eef_offset_pose to the fingertips).
+        # the controlled point's own frame, as if the operator rode on the
+        # TCP looking along the tool +z axis (where the hand camera looks):
+        # cap forward = TCP forward (tool +z), cap right = image right (tool
+        # +x), cap up = image up (tool -y); twist = yaw about the TCP's up
+        # axis, tilt left/right = roll about its forward axis, tilt
+        # forward/back = pitch about its right axis. Since the controlled
+        # point does not translate under a rotation, rotations pivot about it
+        # (set ik_eef_offset_pose to the fingertips).
         control_frame="world",
         # control_frame "tool" only: rotation [deg] about the tool z axis from
         # the tool x/y axes to the image right/down directions, i.e. how the
@@ -113,13 +114,14 @@ class SpacemouseInputDevice(InputDeviceBase):
                 f"[{self.__class__.__name__}] Invalid control_frame: {control_frame}"
             )
         self.control_frame = control_frame
-        # Device frame (x right, y forward, z up) -> tool frame: a half turn
-        # about x (forward -> image up = -y, up -> away from the scene = -z),
-        # then the camera mounting yaw. A proper rotation, so it maps the
-        # rotation axes with the same handedness as the translations.
+        # Device frame (x right, y forward, z up) -> tool frame (x right,
+        # y down, z forward): +90 deg about x (forward -> +z, up -> -y), then
+        # the camera mounting yaw. A proper rotation, so it maps the rotation
+        # axes with the same handedness as the translations (twist about up
+        # -> yaw about tool -y, tilt about forward -> roll about tool +z).
         self.tool_view_rotation = pin.rpy.rpyToMatrix(
             0.0, 0.0, np.deg2rad(tool_view_yaw_deg)
-        ) @ np.diag([1.0, -1.0, -1.0])
+        ) @ pin.rpy.rpyToMatrix(0.5 * np.pi, 0.0, 0.0)
         if gripper_mode not in ("incremental", "toggle"):
             raise ValueError(
                 f"[{self.__class__.__name__}] Invalid gripper_mode: {gripper_mode}"
