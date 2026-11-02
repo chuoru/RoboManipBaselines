@@ -1,0 +1,53 @@
+# FR5 config for the segment pipeline (doc/segment_data_collection.md):
+# SpaceMouse demo collection, interventions, AND rollout of the policies
+# trained on those demos all use THIS file. Keeping one file for both is what
+# guarantees the policy sees at deploy time exactly the observations it was
+# trained on (camera profile, exposure, background mask, TCP, gripper state
+# encoding). Do not deploy these policies with a different env config.
+#
+# Camera settings, background mask and ik_eef_offset_pose are the same as
+# RealFairino5DemoEnv_UmiPolicy_BgMask_5Hz.yaml.
+robot_ip: "192.168.57.2"
+
+# The arm-mounted Orbbec Gemini (see RealFairino5DemoEnv_UmiPolicy.yaml).
+pointcloud_camera_ids:
+  hand: "CV2L3600005M"
+pointcloud_camera_color_resolution: [1280, 800, 10]
+# Auto-exposure, as for the UMI policies: the cell is dark and the view swings
+# between the cell and bright windows. The gripper AprilTags are only read
+# while the arm stands still (grasp/release checks), so motion blur from a
+# longer exposure does not matter for them.
+pointcloud_camera_color_exposure: auto
+# Depth-based background removal [m] -- see common/utils/DepthMaskUtils.py.
+# Applied live, so the recorded demos are already masked.
+pointcloud_camera_background_max_depth: 0.6
+
+gripper_hand_type: "right"
+gripper_modbus_port: "/dev/ttyUSB0"
+gripper_type: "tool_do"
+# Binary gripper: the SpaceMouse (gripper_mode: toggle) and the policy command
+# 0 or 100, and the measured state is reported as 0 / 100. These differ from
+# the 5 Hz UMI-policy config (30 / 60), which was matched to UMI marker
+# widths; that does not matter here because demos and rollouts share this
+# file.
+tool_do_close_threshold: 50.0
+tool_do_closed_percent: 100.0
+
+# IK controlled point = tool flange face centre (same as the UMI configs).
+ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+
+command_log_path: "./logs/command_log.csv"
+
+# Teleop loop: env dt is 20 ms, the loop actually runs at the camera rate
+# (~10 Hz at 1280x800). Demos are resampled to the policy rate afterwards
+# (misc/ResampleRmbData.py), so the recording rate does not have to match.
+# The segment runner sets its own fixed loop period (control_period in the
+# segment YAML, 0.2 s by default); it is deliberately NOT set here, so
+# teleop is not slowed to 5 Hz.
+time_scale: 1.0
+
+# A bit more conservative than the rollout configs for hand-driven motion:
+# 30 deg/s velocity clamp, at most 6 deg per command.
+joint_vel_limit_scale: 1.0
+max_joint_pos_delta_deg: 6.0
+command_smoothing_alpha: 0.3

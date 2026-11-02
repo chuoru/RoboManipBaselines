@@ -39,6 +39,7 @@ from robo_manip_baselines.common import (
     remove_suffix,
     set_random_seed,
 )
+from robo_manip_baselines.common.utils.GlobalKeyListener import GlobalKeyListener
 
 
 class InitialTeleopPhase(PhaseBase):
@@ -305,6 +306,15 @@ class TeleopBase(OperationDataMixin, ABC):
                 self.args.input_device, self.motion_manager, input_device_kwargs
             )
 
+        # Foot pedals (system-wide keys, see GlobalKeyListener). Off unless
+        # --pedal_config is given, so plain teleop never listens globally.
+        self.key_listener = None
+        self.pedal_actions = set()
+        if self.args.pedal_config is not None:
+            self.key_listener = GlobalKeyListener.from_config(self.args.pedal_config)
+            if not self.key_listener.start():
+                self.key_listener = None
+
     def setup_args(self, parser=None, argv=None):
         if parser is None:
             parser = argparse.ArgumentParser(
@@ -429,6 +439,16 @@ class TeleopBase(OperationDataMixin, ABC):
             help="command data keys when replaying log motion",
         )
 
+        parser.add_argument(
+            "--pedal_config",
+            type=str,
+            default=None,
+            help="enable foot pedals with this key binding file (e.g. "
+            "./common/configs/pedal_default.yaml): fail = 'f', intervene = 'n', "
+            "success = 's', caught system-wide so the OpenCV window need not "
+            "have focus. Default: disabled (OpenCV window keys only).",
+        )
+
         parser.add_argument("--seed", type=int, default=-1, help="random seed")
 
         self.set_additional_args(parser)
@@ -518,6 +538,9 @@ class TeleopBase(OperationDataMixin, ABC):
             for input_device in self.input_device_list:
                 input_device.close()
 
+        if self.key_listener is not None:
+            self.key_listener.stop()
+
         self.env.close()
 
     def main_loop(self):
@@ -560,6 +583,7 @@ class TeleopBase(OperationDataMixin, ABC):
             self.phase_manager.post_update()
 
             self.key = cv2.waitKey(1)
+            self.apply_pedal_actions()
             if self.phase_manager.is_phases(["TeleopPhase"]) and self._is_memory_low():
                 # Recorded frames are held in RAM until the episode is saved;
                 # finish the episode (as if 'n' were pressed) before the OS
@@ -586,6 +610,31 @@ class TeleopBase(OperationDataMixin, ABC):
             target_duration = self.get_target_duration()
             if (not self.auto_mode) and (iteration_duration < target_duration):
                 time.sleep(target_duration - iteration_duration)
+
+    # Teleop key each pedal action stands for. The phases only look at
+    # self.key, so a pedal press is turned into that key press.
+    PEDAL_ACTION_KEYS = {"fail": "f", "intervene": "n", "success": "s"}
+
+    def apply_pedal_actions(self):
+        """Merge this tick's pedal presses into self.key (a real key press in
+        the OpenCV window wins if both happen in the same tick)."""
+        if self.key_listener is None:
+            self.pedal_actions = set()
+            return
+        self.pedal_actions = self.key_listener.poll()
+        if self.key != -1:
+            return
+        for action in ("fail", "success", "intervene"):
+            if action in self.pedal_actions:
+                self.key = ord(self.PEDAL_ACTION_KEYS[action])
+                return
+
+    def is_action(self, name):
+        """Whether the logical action `name` ("fail", "intervene",
+        "success") was triggered this tick, by its OpenCV key or a pedal."""
+        return name in self.pedal_actions or self.key == ord(
+            self.PEDAL_ACTION_KEYS[name]
+        )
 
     # Minimum available system memory [GB] while recording; see main_loop().
     MIN_AVAILABLE_MEMORY_GB = 1.5

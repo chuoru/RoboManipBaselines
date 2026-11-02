@@ -45,6 +45,7 @@ from ..utils.DataUtils import (
     normalize_data,
 )
 from ..utils.EefPoseRetargetUtils import EpisodeRelativeEefPoseRetargeter
+from ..utils.GlobalKeyListener import GlobalKeyListener
 from ..utils.RelativeEefActionUtils import get_absolute_eef_pose9
 from ..utils.MathUtils import get_pose_from_se3, get_se3_from_pose, set_random_seed
 from ..utils.MiscUtils import remove_prefix, remove_suffix
@@ -276,6 +277,15 @@ class RolloutBase(OperationDataMixin, ABC):
 
         self.setup_variables()
 
+        # Foot pedals (system-wide keys, see GlobalKeyListener); off unless
+        # --pedal_config is given.
+        self.key_listener = None
+        self.pedal_actions = set()
+        if self.args.pedal_config is not None:
+            self.key_listener = GlobalKeyListener.from_config(self.args.pedal_config)
+            if not self.key_listener.start():
+                self.key_listener = None
+
     def setup_args(self, parser=None, argv=None):
         if parser is None:
             parser = argparse.ArgumentParser(
@@ -458,6 +468,15 @@ class RolloutBase(OperationDataMixin, ABC):
                 "directory to save the output image (default: current directory, "
                 "used only when '--output_image_dir' option is enabled)."
             ),
+        )
+
+        parser.add_argument(
+            "--pedal_config",
+            type=str,
+            default=None,
+            help="enable foot pedals with this key binding file (e.g. "
+            "./common/configs/pedal_default.yaml); the success pedal acts as "
+            "the 'n' key. Default: disabled.",
         )
 
         parser.add_argument(
@@ -767,6 +786,7 @@ class RolloutBase(OperationDataMixin, ABC):
                 self.key = cv2.waitKey(1)
             else:
                 self.key = cv2.waitKey(1)
+            self.apply_pedal_actions()
 
             self.phase_manager.check_transition()
 
@@ -780,7 +800,33 @@ class RolloutBase(OperationDataMixin, ABC):
                 if remaining > 0:
                     time.sleep(remaining)
 
+    # Rollout key each pedal action stands for (see apply_pedal_actions).
+    PEDAL_ACTION_KEYS = {"success": "n"}
+
+    def apply_pedal_actions(self):
+        """Merge this tick's pedal presses into self.key, so the phases'
+        existing key checks see them (a real key press wins)."""
+        if self.key_listener is None:
+            self.pedal_actions = set()
+            return
+        self.pedal_actions = self.key_listener.poll()
+        if self.key != -1:
+            return
+        for action, key in self.PEDAL_ACTION_KEYS.items():
+            if action in self.pedal_actions:
+                self.key = ord(key)
+                return
+
+    def is_action(self, name):
+        """Whether the logical action `name` was triggered this tick, by a
+        pedal or by the OpenCV key it stands for."""
+        key = self.PEDAL_ACTION_KEYS.get(name)
+        return name in self.pedal_actions or (key is not None and self.key == ord(key))
+
     def finalize(self):
+        if self.key_listener is not None:
+            self.key_listener.stop()
+
         if self.args.result_filename is not None:
             print(
                 f"[{self.__class__.__name__}] Save the rollout results: {self.args.result_filename}"

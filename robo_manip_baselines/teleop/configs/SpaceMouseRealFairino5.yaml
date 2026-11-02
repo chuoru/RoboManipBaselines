@@ -1,0 +1,52 @@
+# SpaceMouse Compact (2 buttons) driving the FR5 for segment demo collection
+# and interventions -- see doc/segment_data_collection.md.
+#
+#   python ./bin/Teleop.py RealFairino5Demo \
+#     --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
+#     --input_device spacemouse \
+#     --input_device_config ./teleop/configs/SpaceMouseRealFairino5.yaml
+#
+# Every key here maps to a SpacemouseInputDevice constructor argument.
+
+# Open the Compact explicitly. Leave device_params empty ({}) to open the
+# first 3Dconnexion device found. Names pyspacemouse knows include
+# "SpaceMouse Compact", "SpaceMouse Wireless", "SpaceNavigator".
+device_params:
+  device: "SpaceMouse Compact"
+
+# Velocity mode: a full deflection moves the target at this speed whatever the
+# loop rate is. The per-tick pos_scale/rpy_scale below are then unused. Speed
+# must not depend on the loop rate here because the same device drives teleop
+# (camera-bound, ~10 Hz at 1280x800) and interventions in the 5 Hz segment
+# runner; with per-tick scales the arm would move 2x slower in the latter.
+#   0.05 m/s  -> 5 cm per second at full deflection (1 cm per 5 Hz tick)
+#   0.5 rad/s -> ~29 deg/s about x/y; yaw is 2x (see SpacemouseInputDevice)
+# Slow and steady demos are what the policy learns best; raise these only if
+# the operator really cannot keep up.
+max_lin_vel: 0.05
+max_ang_vel: 0.5
+
+# Only used if max_lin_vel / max_ang_vel are removed: per-tick motion at full
+# deflection. At a 10 Hz loop 3e-3 = 3 cm/s and 3e-3 rad = 1.7 deg/s per tick.
+pos_scale: 3.0e-3
+rpy_scale: 3.0e-3
+
+# A resting hand on the cap reads up to ~0.05; ignore that.
+deadzone: 0.08
+# EMA on the axes (1.0 = off).
+smoothing_alpha: 0.5
+
+# x, y, z, roll, pitch, yaw. Set roll/pitch to 0 to keep the gripper pointing
+# straight down if the task never needs a tilt.
+axis_sign: [1, 1, 1, 1, 1, 1]
+axis_enable: [1, 1, 1, 1, 1, 1]
+rotation_frame: world
+
+# Binary tool_do gripper: left button toggles open (0) / closed (100).
+gripper_mode: toggle
+gripper_button: 0
+gripper_open_value: 0.0
+gripper_closed_value: 100.0
+# Right button toggles precision mode (1/3 speed) for the last centimetres.
+precision_button: 1
+precision_scale: 0.3333

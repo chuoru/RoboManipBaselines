@@ -1,0 +1,15 @@
+# RealFairino5DemoEnv_SpaceMouse.yaml without any hardware: no robot
+# connection, no cameras. Commands are printed and the "measured" joints
+# follow the command. Use it to check segment YAMLs, pose files and the
+# segment runner's control flow before going to the real arm.
+robot_ip: "192.168.57.2"
+dry_run: true
+gripper_type: "tool_do"
+tool_do_close_threshold: 50.0
+tool_do_closed_percent: 100.0
+ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+command_log_path: "./logs/command_log_dryrun.csv"
+time_scale: 1.0
+joint_vel_limit_scale: 1.0
+max_joint_pos_delta_deg: 6.0
+command_smoothing_alpha: 0.3

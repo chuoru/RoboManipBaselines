@@ -1,0 +1,25 @@
+# Foot pedal / fallback key bindings for common/utils/GlobalKeyListener.py.
+#
+# Keys are pynput key names: the character for printable keys ("1", "a"),
+# the key name otherwise ("f13", "page_down"). Run
+#   python ./misc/CheckPedalKeys.py
+# and press each pedal to see what it actually sends, then put that name
+# first in the matching list below.
+#
+# Logical actions (what they do depends on the program):
+#   fail      | Teleop: discard the episode (= 'f')   | Segments: segment failed -> retry
+#   intervene | Teleop: next / start / finish (= 'n') | Segments: start / end an intervention
+#   success   | Teleop: save the episode (= 's')      | Segments: segment succeeded / resume after a stop
+#
+# Physical layout: left pedal = fail, middle = intervene, right = success.
+# The number keys are a keyboard fallback. They are caught system-wide, so do
+# not type in another window while a program with --pedal_config is running.
+pedal_keys:
+  fail: ["f13", "1"]
+  intervene: ["f14", "2"]
+  success: ["f15", "3"]
+
+# Presses of the same action closer together than this [s] count as one (a
+# pedal's contact can bounce, and an intervention toggled twice by one
+# stomp would hand control straight back to the policy).
+debounce_sec: 0.3
