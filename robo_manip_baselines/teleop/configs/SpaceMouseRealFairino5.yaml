@@ -40,10 +40,10 @@ smoothing_alpha: 0.5
 # tilting if the task never needs a tilt.
 axis_sign: [1, 1, 1, 1, 1, 1]
 axis_enable: [1, 1, 1, 1, 1, 1]
-# Per-axis speed factor. Pitch and yaw felt too fast on the real arm
-# (yaw runs at 2x max_ang_vel by design): pitch 0.6 -> ~17 deg/s, yaw 0.5 ->
-# ~29 deg/s (same as roll) at full deflection.
-axis_scale: [1.0, 1.0, 1.0, 1.0, 0.6, 0.5]
+# Per-axis speed factor. Roll and pitch are rarely needed for this task, so
+# they are slow (0.3 -> ~9 deg/s at full deflection) and hard to trigger by
+# accident; yaw runs at 2x max_ang_vel by design, 0.5 -> ~29 deg/s.
+axis_scale: [1.0, 1.0, 1.0, 0.3, 0.3, 0.5]
 
 # The operator watches the hand-camera image, which looks along the gripper
 # (roughly horizontal at the ready pose), so drive the TCP in its own frame
