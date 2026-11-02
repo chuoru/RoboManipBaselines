@@ -1,0 +1,26 @@
+# Demo collection for the "grasp" segment of CupPickPlace (doc/segment_data_collection.md).
+#
+#   python ./bin/Teleop.py RealFairino5Demo \
+#     --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
+#     --input_device spacemouse --input_device_config ./teleop/configs/SpaceMouseRealFairino5.yaml \
+#     --pre_segments ./envs/configs/segments/collect_grasp.yaml \
+#     --pedal_config ./common/configs/pedal_default.yaml \
+#     --demo_name CupPickPlace_grasp_SM_iter000
+#
+# Each demo: (reset pose) -> home -> [operator: approach the cup and close
+# the gripper] -> auto finish once closed -> SUCCESS saves / FAIL discards
+# -> the gripper releases the cup and the arm retreats upward.
+segment: grasp
+poses: ../poses/CupPickPlace.yaml
+# Same start pose as the grasp segment in CupPickPlace.yaml.
+pre_segments:
+  - {joint_pos: home}
+# After saving/discarding: let go of the cup and move up before the next
+# reset moves the arm back home (moving home with the fingers around the cup
+# would drag it along).
+post_segments:
+  - {gripper: open}
+  - {rel_xyz: [0, 0, 0.08]}
+# Same end condition as the grasp segment.
+auto_finish_on: gripper_closed
+auto_finish_ticks: 5

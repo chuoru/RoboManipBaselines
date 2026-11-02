@@ -1,0 +1,29 @@
+# Demo collection for the "place" segment of CupPickPlace, method B
+# (doc/segment_data_collection.md): the cup is always picked from the same
+# fixture by a script, so it sits in the gripper the same way in every demo.
+#
+#   python ./bin/Teleop.py RealFairino5Demo \
+#     --config ./envs/configs/RealFairino5DemoEnv_SpaceMouse.yaml \
+#     --input_device spacemouse --input_device_config ./teleop/configs/SpaceMouseRealFairino5.yaml \
+#     --pre_segments ./envs/configs/segments/collect_place.yaml \
+#     --pedal_config ./common/configs/pedal_default.yaml \
+#     --demo_name CupPickPlace_place_SM_iter000
+#
+# Each demo: (reset pose) -> home -> above the fixture -> down -> close ->
+# up -> carry -> [operator: put the cup on the coaster and open the gripper]
+# -> auto finish once open -> SUCCESS saves / FAIL discards -> retreat up.
+# Put the cup back into the fixture and move the coaster before the next demo.
+segment: place
+poses: ../poses/CupPickPlace.yaml
+pre_segments:
+  - {joint_pos: home}
+  - {joint_pos: fixture_above}
+  - {joint_pos: fixture_grasp, vel: 5}
+  - {gripper: close}
+  - {rel_xyz: [0, 0, 0.10]}
+  # Same start pose as the place segment in CupPickPlace.yaml.
+  - {joint_pos: carry}
+post_segments:
+  - {rel_xyz: [0, 0, 0.08]}
+auto_finish_on: gripper_opened
+auto_finish_ticks: 5

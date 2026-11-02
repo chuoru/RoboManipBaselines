@@ -39,6 +39,13 @@ from robo_manip_baselines.common import (
     remove_suffix,
     set_random_seed,
 )
+from robo_manip_baselines.common.base.SegmentPhases import (
+    get_gripper_close_threshold,
+    get_measured_gripper,
+    load_named_poses,
+    make_primitive_phase,
+    resolve_path,
+)
 from robo_manip_baselines.common.utils.GlobalKeyListener import GlobalKeyListener
 
 
@@ -107,9 +114,10 @@ class TeleopPhase(PhaseBase):
 
     def post_update(self):
         self.op.teleop_time_idx += 1
+        self.op.update_auto_finish()
 
     def check_transition(self):
-        if self.op.key == ord("n"):
+        if self.op.key == ord("n") or self.op.auto_finish_reached():
             print(
                 f"[{self.op.__class__.__name__}] Finish teleoperation. duration: {self.get_elapsed_duration():.1f} [s]"
             )
@@ -122,6 +130,7 @@ class TeleopPhase(PhaseBase):
 class EndTeleopPhase(PhaseBase):
     def start(self):
         super().start()
+        self.decided = False
 
         if (not self.op.args.save_success_only) or (self.op.reward >= 1.0):
             print(
@@ -140,10 +149,27 @@ class EndTeleopPhase(PhaseBase):
             self.op.result["reward"].append(float(self.op.reward))
             self.op.result["duration"].append(self.op.episode_duration)
             self.op.save_data()
-            self.op.reset_flag = True
+            self.finish()
         elif self.op.key == ord("f"):
             print(f"[{self.op.__class__.__name__}] Reset without saving the data.")
+            self.finish()
+
+    def finish(self):
+        # With --pre_segments' post_segments (e.g. release and retreat after
+        # a grasp demo) those run first; ResetAfterSegmentsPhase resets.
+        if len(self.op.post_segment_phases) > 0:
+            self.decided = True
+        else:
             self.op.reset_flag = True
+
+    def check_transition(self):
+        return self.decided
+
+
+class ResetAfterSegmentsPhase(PhaseBase):
+    def start(self):
+        super().start()
+        self.op.reset_flag = True
 
 
 class ReplayPhase(PhaseBase):
@@ -241,6 +267,9 @@ class TeleopBase(OperationDataMixin, ABC):
             self.replay_filenames = find_rmb_files(self.args.replay_log)
             self.replay_filenames *= self.args.replay_repeat_count
             self.replay_file_idx = 0
+
+        # Scripted steps around each demo (--pre_segments)
+        self.load_collect_segments()
 
         # Setup phase manager
         self.setup_phase_manager()
@@ -440,6 +469,37 @@ class TeleopBase(OperationDataMixin, ABC):
         )
 
         parser.add_argument(
+            "--pre_segments",
+            type=str,
+            default=None,
+            help="segment collection YAML (e.g. ./envs/configs/segments/collect_grasp.yaml): "
+            "scripted steps run before each demo starts (and after it ends), "
+            "the segment name recorded with the demo, and its end condition",
+        )
+        parser.add_argument(
+            "--poses",
+            type=str,
+            default=None,
+            help="named pose YAML overriding the one --pre_segments names",
+        )
+        parser.add_argument(
+            "--auto_finish_on",
+            type=str,
+            default=None,
+            choices=["gripper_closed", "gripper_opened"],
+            help="finish the demo automatically once the measured gripper has "
+            "been closed / opened for --auto_finish_ticks loops (default: "
+            "from --pre_segments, else off)",
+        )
+        parser.add_argument(
+            "--auto_finish_ticks",
+            type=int,
+            default=None,
+            help="loops the --auto_finish_on condition must hold (default: from "
+            "--pre_segments, else 5)",
+        )
+
+        parser.add_argument(
             "--pedal_config",
             type=str,
             default=None,
@@ -473,6 +533,69 @@ class TeleopBase(OperationDataMixin, ABC):
             f"[{self.__class__.__name__}] This method should be defined in the Operation class and inherited from it."
         )
 
+    def load_collect_segments(self):
+        """Read --pre_segments: scripted steps before/after each demo, the
+        segment name, and the auto-finish condition."""
+        self.collect_config = {}
+        self.segment_name = None
+        self.pre_segment_phases = []
+        self.post_segment_phases = []
+        if self.args.pre_segments is not None:
+            path = resolve_path(self.args.pre_segments)
+            with open(path, "r") as f:
+                self.collect_config = yaml.safe_load(f) or {}
+            base_dir = os.path.dirname(os.path.abspath(path))
+            if self.args.poses is not None:
+                poses_path = resolve_path(self.args.poses)
+            else:
+                poses_path = resolve_path(self.collect_config["poses"], base_dir)
+            named_poses = load_named_poses(poses_path)
+            self.segment_name = self.collect_config.get("segment")
+            self.pre_segment_phases = [
+                make_primitive_phase(self, spec, named_poses)
+                for spec in self.collect_config.get("pre_segments", [])
+            ]
+            self.post_segment_phases = [
+                make_primitive_phase(self, spec, named_poses)
+                for spec in self.collect_config.get("post_segments", [])
+            ]
+            if self.segment_name is not None:
+                # Recorded with every demo, like the segment runner's attempts.
+                self.data_manager.meta_data["segment"] = self.segment_name
+                self.data_manager.meta_data["segment_result"] = "success"
+                self.data_manager.meta_data["segment_source"] = "teleop"
+            print(
+                f"[{self.__class__.__name__}] Segment '{self.segment_name}': "
+                f"{len(self.pre_segment_phases)} scripted step(s) before, "
+                f"{len(self.post_segment_phases)} after each demo."
+            )
+        if self.args.auto_finish_on is None:
+            self.args.auto_finish_on = self.collect_config.get("auto_finish_on")
+        if self.args.auto_finish_ticks is None:
+            self.args.auto_finish_ticks = int(self.collect_config.get("auto_finish_ticks", 5))
+        self._auto_finish_count = 0
+
+    def update_auto_finish(self):
+        """Count consecutive loops in which the --auto_finish_on gripper
+        condition holds (called every TeleopPhase loop)."""
+        if self.args.auto_finish_on is None:
+            return
+        closed = get_measured_gripper(self) >= get_gripper_close_threshold(self)
+        condition = closed if self.args.auto_finish_on == "gripper_closed" else not closed
+        self._auto_finish_count = self._auto_finish_count + 1 if condition else 0
+
+    def auto_finish_reached(self):
+        if self.args.auto_finish_on is None:
+            return False
+        if self._auto_finish_count >= self.args.auto_finish_ticks:
+            print(
+                f"[{self.__class__.__name__}] Gripper {self.args.auto_finish_on.split('_')[1]} "
+                f"for {self.args.auto_finish_ticks} loops: finish the demo."
+            )
+            self._auto_finish_count = 0
+            return True
+        return False
+
     def setup_phase_manager(self):
         if self.args.replay_log is None:
             operation_phases = [
@@ -482,11 +605,17 @@ class TeleopBase(OperationDataMixin, ABC):
             ]
             if self.args.sync_before_record:
                 operation_phases.insert(1, SyncPhase(self))
+            if len(self.post_segment_phases) > 0:
+                operation_phases += [
+                    *self.post_segment_phases,
+                    ResetAfterSegmentsPhase(self),
+                ]
         else:
             operation_phases = [ReplayPhase(self), EndReplayPhase(self)]
         phase_order = [
             InitialTeleopPhase(self),
             *self.get_pre_motion_phases(),
+            *self.pre_segment_phases,
             *operation_phases,
         ]
         self.phase_manager = PhaseManager(phase_order)

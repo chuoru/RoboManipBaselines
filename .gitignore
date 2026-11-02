@@ -26,3 +26,5 @@ robo_manip_baselines/Log
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/aprilgrid_a4.png
 /robo_manip_baselines/envs/real/insta360_bridge/calibration/aprilgrid_a4.pdf
 robo_manip_baselines/envs/real/insta360_bridge/build_mono/*
+# train_segment.sh run log
+robo_manip_baselines/summary.log
