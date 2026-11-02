@@ -39,6 +39,7 @@ $ export PYTHONPATH=/mnt/data/fairino_fr5/RoboManipBaselines_segment_dagger:/mnt
 1. `python ./misc/CheckPedalKeys.py` を起動し、左・中・右のペダルを順に踏んで、表示されるキー名を控えます。
 2. `common/configs/pedal_default.yaml` の `fail`（左）/ `intervene`（中）/ `success`（右）の先頭に、そのキー名を書きます。
 3. 数字キー 1 / 2 / 3 は予備です。ペダルはシステム全体で拾うので、収集中は他のウィンドウで文字を打たないでください。
+4. FR5 の PC のフットスイッチ（PCsensor、USB 3553:b010）は左から `a` / `b` / `c` を送ります（設定済み）。この文字はフォーカスのあるウィンドウにも入力されるので、収集中はフォーカスを OpenCV のウィンドウに置いてください（ターミナルにあると、終了後にシェルへ文字が残ります）。
 
 | ペダル | Teleop（収集）での意味 | RolloutSegments での意味 |
 |---|---|---|

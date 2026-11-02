@@ -12,7 +12,7 @@
 - [ ] ひねる・傾けると指先を中心に回る（指先が振れない）。振れるなら `ik_eef_offset_pose` の z（現在 0.25 m = フランジ面 + 150 mm）を直す
 - [ ] 速度（`max_lin_vel` 0.05 m/s, `max_ang_vel` 0.5 rad/s）とデッドゾーン（0.08）が操作しやすいか。手を置いただけでドリフトしないか
 - [ ] 左ボタンでグリッパが開閉し、右ボタンで精密モード（1/3 速度）が切り替わる
-- [ ] `python ./misc/CheckPedalKeys.py` で3つのペダルのキー名を確認し、`common/configs/pedal_default.yaml` に書いた
+- [x] `python ./misc/CheckPedalKeys.py` で3つのペダルのキー名を確認し、`common/configs/pedal_default.yaml` に書いた（左から a / b / c）
 - [ ] OpenCV ウィンドウにフォーカスがなくてもペダルが効く（Teleop で 中=`n`、右=保存、左=破棄）
 - [ ] ペダルを踏みっぱなしにしても1回しか反応しない
 

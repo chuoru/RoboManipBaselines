@@ -14,10 +14,16 @@
 # Physical layout: left pedal = fail, middle = intervene, right = success.
 # The number keys are a keyboard fallback. They are caught system-wide, so do
 # not type in another window while a program with --pedal_config is running.
+#
+# The PCsensor FootSwitch (USB 3553:b010) on the FR5 PC sends "a" / "b" / "c"
+# from left to right (checked with CheckPedalKeys.py). These letters are
+# also typed into whatever window has focus, so keep the focus on the
+# program's OpenCV window while collecting. None of the programs that take
+# --pedal_config binds a / b / c to anything else.
 pedal_keys:
-  fail: ["f13", "1"]
-  intervene: ["f14", "2"]
-  success: ["f15", "3"]
+  fail: ["a", "1"]
+  intervene: ["b", "2"]
+  success: ["c", "3"]
 
 # Presses of the same action closer together than this [s] count as one (a
 # pedal's contact can bounce, and an intervention toggled twice by one
