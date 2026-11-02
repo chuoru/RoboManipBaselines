@@ -1533,13 +1533,22 @@ class SegmentRunnerBase(OperationDataMixin):
     def check_camera(self):
         """A reason string if a camera has stopped delivering frames."""
         cameras = getattr(self.env.unwrapped, "pointcloud_cameras", {}) or {}
+        if not hasattr(self, "_camera_last_seen"):
+            self._camera_last_seen = {}
         now = time.time()
         for name, camera in cameras.items():
             last_frame_time = camera.get("last_frame_time")
-            if last_frame_time is None:
-                continue
-            if now - last_frame_time > self.args.camera_timeout:
-                return f"camera '{name}' has delivered no frame for {now - last_frame_time:.0f} s"
+            if last_frame_time is not None:
+                self._camera_last_seen[name] = max(
+                    last_frame_time, self._camera_last_seen.get(name, 0.0)
+                )
+            # The env resets last_frame_time to None while it restarts a
+            # silent camera; keep counting from the last frame seen.
+            last_seen = self._camera_last_seen.get(name)
+            if last_seen is None:
+                continue  # no frame yet since startup
+            if now - last_seen > self.args.camera_timeout:
+                return f"camera '{name}' has delivered no frame for {now - last_seen:.0f} s"
         return None
 
     def shutdown(self):

@@ -576,5 +576,23 @@ class TestSegmentRunner(unittest.TestCase):
             self.run_runner([], ["--mode", "exhibit"], policies={})
 
 
+class TestCameraCheck(unittest.TestCase):
+    def test_camera_restart_does_not_hide_a_dead_camera(self):
+        import time
+
+        runner = object.__new__(SegmentRunnerBase)
+        camera = {"last_frame_time": None}
+        runner.env = types.SimpleNamespace(
+            unwrapped=types.SimpleNamespace(pointcloud_cameras={"hand": camera})
+        )
+        runner.args = types.SimpleNamespace(camera_timeout=0.1)
+        self.assertIsNone(runner.check_camera())  # no frame yet: not a fault
+        camera["last_frame_time"] = time.time()
+        self.assertIsNone(runner.check_camera())
+        camera["last_frame_time"] = None  # the env restarts the pipeline
+        time.sleep(0.15)
+        self.assertIn("no frame", runner.check_camera())
+
+
 if __name__ == "__main__":
     unittest.main()
