@@ -19,12 +19,20 @@
 #                    on_fail: scripted steps that bring the arm back to the
 #                             segment's start pose before a retry
 #                    checkpoint: policy_best.ckpt (model_meta_info.pkl next to it)
+#                    check: grasp_check | released_check  (finger AprilTags, after `done`)
+#                    check_undetected: pass | fail | defer  (tags not visible;
+#                      defer = pass now, a later check decides)
+#   check          a check on its own between scripted segments (check:,
+#                  undetected:, fail_reason:); a failure retries the learned
+#                  segment before it (its on_fail first)
 #
 # Every learned segment must start from the same pose every time (the
 # scripted segment before it) and should be followed by a relative retreat:
 # where it ends differs every time.
 task_name: CupPickPlace
 poses: ../poses/CupPickPlace.yaml
+# Finger AprilTag detection (handed to the env) and check thresholds.
+gripper_marker: ../gripper_marker/CupPickPlace.yaml
 # Loop period [s] = one policy step; the policies are trained on data
 # resampled to the same rate (misc/ResampleRmbData.py --target_hz 5).
 control_period: 0.2
@@ -36,17 +44,26 @@ segments:
     checkpoint: ../../../checkpoint/DiffusionPolicy/CupPickPlace_grasp_iter000/policy_best.ckpt
     done: gripper_closed_for_ticks
     done_ticks: 5
+    # Fingers stopped by the cup? Hidden tags (cup in front of them on the
+    # table) are decided again by lift_check.
+    check: grasp_check
+    check_undetected: defer
     # Roughly 2-3x the average grasp demo; time under human control does not count.
     timeout_s: 30
     max_retries: 2
     on_fail: [{gripper: open}, {rel_xyz: [0, 0, 0.08]}, {joint_pos: home}]
   - {name: lift, type: scripted_move, rel_xyz: [0, 0, 0.10]}
+  # Still holding it after lifting? (empty -> "dropped"; tags still hidden -> failure)
+  - {name: lift_check, type: check, check: grasp_check, undetected: fail, fail_reason: dropped}
   - {name: go_carry, type: scripted_move, joint_pos: carry}
   - name: place
     type: learned
     checkpoint: ../../../checkpoint/DiffusionPolicy/CupPickPlace_place_iter000/policy_best.ckpt
     done: gripper_opened_for_ticks
     done_ticks: 5
+    # Did the fingers really open (not only the command)?
+    check: released_check
+    check_undetected: pass
     timeout_s: 30
     max_retries: 2
     # Keep holding the cup: do not open the gripper on a failed place.

@@ -72,6 +72,15 @@ class DataKey:
     # command counterpart, as this is a passive sensor reading.
     MEASURED_WEIGHT = "measured_weight"
 
+    # Segment-runner recordings only (common/base/SegmentRunnerBase.py).
+    # Deliberately NOT in MEASURED_DATA_KEYS: they are diagnostics and data
+    # selection labels, never policy inputs.
+    # Finger AprilTag distance [m] (NaN while the tags are not detected), see
+    # common/utils/GripperMarkerTracker.py.
+    MEASURED_GRIPPER_MARKER_WIDTH = "measured_gripper_marker_width"
+    # 1 if the latest camera frame had the finger tags, else 0.
+    GRIPPER_MARKER_DETECTED = "gripper_marker_detected"
+
     # All keys of measured data
     MEASURED_DATA_KEYS = [
         MEASURED_JOINT_POS,

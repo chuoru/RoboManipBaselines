@@ -3,10 +3,15 @@ import time
 from os import path
 
 import numpy as np
+import yaml
 from fairino import Robot
 from gymnasium.spaces import Box, Dict
 
 from robo_manip_baselines.common import ArmConfig
+from robo_manip_baselines.common.base.SegmentPhases import resolve_path
+from robo_manip_baselines.common.utils.GripperMarkerTracker import (
+    GripperMarkerTracker,
+)
 from robo_manip_baselines.teleop import (
     GelloInputDevice,
     KeyboardInputDevice,
@@ -140,6 +145,14 @@ class RealFairino5EnvBase(RealEnvBase):
         # Depth-based background removal on the camera image [m] (None = off),
         # see RealEnvBase.setup_femtobolt.
         pointcloud_camera_background_max_depth=None,
+        # AprilTag finger-width tracking on a camera image (None = off): the
+        # gripper_marker_config dict (same keys as RealUMIDemo.yaml's), or the
+        # path of a YAML file holding it under "gripper_marker_config" (e.g.
+        # envs/configs/gripper_marker/CupPickPlace.yaml). Only READ for the
+        # segment runner's grasp/release checks: measured_gripper_joint_pos
+        # stays the tool_do state, so a hidden tag never changes the policy's
+        # observation. See common/utils/GripperMarkerTracker.py.
+        gripper_marker_config=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -272,6 +285,39 @@ class RealFairino5EnvBase(RealEnvBase):
             self.rgb_tactiles = {}
             self.intensity_tactiles = {}
 
+        self.gripper_marker_tracker = None
+        self.gripper_marker_config = self.load_gripper_marker_config(gripper_marker_config)
+        if self.gripper_marker_config is not None:
+            self.gripper_marker_tracker = GripperMarkerTracker(
+                self.gripper_marker_config, self.get_latest_rgb_camera_frame
+            )
+            self.gripper_marker_tracker.start()
+
+    @staticmethod
+    def load_gripper_marker_config(config):
+        if config is None or isinstance(config, dict):
+            return config
+        with open(resolve_path(config), "r") as f:
+            loaded = yaml.safe_load(f)
+        return loaded.get("gripper_marker_config", loaded)
+
+    @property
+    def has_gripper_marker_tracking(self):
+        return self.gripper_marker_tracker is not None
+
+    @property
+    def latest_gripper_marker_percent_closed(self):
+        if self.gripper_marker_tracker is None:
+            return None
+        return self.gripper_marker_tracker.get_reading()["percent_closed"]
+
+    def get_gripper_marker_reading(self):
+        """Latest finger-tag reading (see GripperMarkerTracker.get_reading),
+        or None without tracking."""
+        if self.gripper_marker_tracker is None:
+            return None
+        return self.gripper_marker_tracker.get_reading()
+
     def _check_fr_code(self, fr_code):
         if fr_code != 0:
             error_messages = {
@@ -343,6 +389,8 @@ class RealFairino5EnvBase(RealEnvBase):
         self._last_servoj_time = None
 
     def close(self):
+        if getattr(self, "gripper_marker_tracker", None) is not None:
+            self.gripper_marker_tracker.stop()
         if self.robot is not None:
             try:
                 self.robot.ServoMoveEnd()
@@ -865,6 +913,13 @@ class RealFairino5EnvBase(RealEnvBase):
                     self._last_gripper_percent_closed = gripper_percent_closed
             gripper_joint_pos = np.array([gripper_percent_closed], dtype=np.float64)
             gripper_joint_vel = np.zeros(1)
+
+        # Without async_detection, read the tags here, once per step.
+        tracker = self.gripper_marker_tracker
+        if tracker is not None and not tracker.async_detection:
+            frame = self.get_latest_rgb_camera_frame(tracker.camera_name)
+            if frame is not None:
+                tracker.update_from_frame(frame)
 
         # This arm has no force/torque sensor
         wrench = np.zeros(6, dtype=np.float64)

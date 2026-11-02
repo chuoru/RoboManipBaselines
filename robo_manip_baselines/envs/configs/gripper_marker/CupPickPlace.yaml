@@ -1,0 +1,67 @@
+# Finger AprilTags seen by the FR5 hand camera: used to check that a grasp
+# really holds the cup (fingers stopped by it), that it was not dropped while
+# lifting, and that the gripper really opened after placing -- see
+# common/utils/GripperCheckUtils.py. Referenced by the task YAML
+# (envs/configs/segments/CupPickPlace.yaml, key gripper_marker); the segment
+# runner hands gripper_marker_config to the env. To see the width while
+# teleoperating, add
+#   gripper_marker_config: ./envs/configs/gripper_marker/CupPickPlace.yaml
+# to the env config and pass --plot_gripper_marker to bin/Teleop.py.
+#
+# BEFORE USE on the real arm (doc/segment_dagger_checklist.md, M4):
+#  1. Confirm both finger tags are fully visible in the hand camera with the
+#     gripper open, closed empty, and closed on the cup (misc/ViewGripperMarkerDetection.py).
+#  2. Query this camera's (CV2L3600005M) color intrinsics at 1280x800 and
+#     replace camera_matrix / dist_coeffs (the values below are the UMI rig's
+#     Gemini 305, CV2L3600004F: same model, NOT the same unit).
+#  3. Set nominal_z to the measured tag depth on this gripper.
+#  4. Run misc/CalibrateGripperMarkerWidth.py --env RealFairino5DemoEnv-v0
+#     --save_to <this file> to fill width_open_m / width_closed_m and the
+#     checks thresholds below.
+gripper_marker_config:
+  camera_name: hand
+  aruco_dict:
+    predefined: DICT_APRILTAG_16h5
+  marker_size_map:
+    default: null
+    0: 0.015
+    1: 0.015
+  left_marker_id: 1
+  right_marker_id: 0
+  # Tag depth from the camera [m] and the accepted band around it.
+  nominal_z: 0.18
+  z_tolerance: 0.025
+  # UMI rig values (see step 2 above).
+  camera_matrix:
+    - [614.8552, 0.0, 633.1625]
+    - [0.0, 614.5864, 399.3985]
+    - [0.0, 0.0, 1.0]
+  dist_coeffs: [-1.040665, 0.473363, 0.000018, -0.000214, -0.046332, -1.021658, 0.447134, -0.036214]
+  clahe_clip_limit: 0.0
+  # Search only where the fingers can appear (x0, y0, x1, y1); null = whole image.
+  roi: null
+  # Detect in a background thread (one detection per camera frame).
+  async_detection: true
+  max_width_jump_m: 0.03
+  width_smoothing_alpha: 0.3
+  # Tag distance [m] fully open / fully closed with nothing in between.
+  width_open_m: null
+  width_closed_m: null
+
+checks:
+  # Wait this long [s] after the gripper command before reading (fingers
+  # still moving), then collect readings for window_sec and take the median
+  # of those with both tags found; fewer than min_detections = "undetected".
+  settle_sec: 0.6
+  window_sec: 1.0
+  min_detections: 3
+  grasp:
+    # median width <= width_min_m: closed on nothing (empty grasp / dropped)
+    # median width >= width_max_m: fingers did not close
+    # Calibrate: width_min_m between "closed empty" and "closed on the cup",
+    # width_max_m between "closed on the cup" and "open".
+    width_min_m: null
+    width_max_m: null
+  release:
+    # median width >= width_open_min_m: the gripper really opened.
+    width_open_min_m: null

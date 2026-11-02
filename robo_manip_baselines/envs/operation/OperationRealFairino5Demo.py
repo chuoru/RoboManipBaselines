@@ -82,6 +82,9 @@ class OperationRealFairino5Demo:
         # sent (see RealFairino5EnvBase.command_smoothing_alpha). Lower =
         # smoother but laggier; 1.0 = no filtering.
         command_smoothing_alpha=0.3,
+        # AprilTag finger-width tracking for the segment runner's checks
+        # (dict or YAML path) -- see RealFairino5EnvBase.
+        gripper_marker_config=None,
     ):
         self.robot_ip = robot_ip
         self.camera_ids = camera_ids
@@ -107,6 +110,7 @@ class OperationRealFairino5Demo:
         self.ik_eef_offset_pose = ik_eef_offset_pose
         self.control_period = control_period
         self.command_smoothing_alpha = command_smoothing_alpha
+        self.gripper_marker_config = gripper_marker_config
         super().__init__()
 
     def setup_env(self, render_mode="human"):
@@ -144,6 +148,7 @@ class OperationRealFairino5Demo:
             ik_eef_offset_pose=self.ik_eef_offset_pose,
             control_period=self.control_period,
             command_smoothing_alpha=self.command_smoothing_alpha,
+            gripper_marker_config=self.gripper_marker_config,
         )
 
     def get_pre_motion_phases(self):

@@ -1121,11 +1121,25 @@ class TeleopBase(OperationDataMixin, ABC):
         percent_closed = self.motion_manager.get_data(
             DataKey.MEASURED_GRIPPER_JOINT_POS, self.obs
         )[0]
+        title_suffix = ""
+        # Envs whose measured gripper is not the marker estimate (the FR5's
+        # is its binary tool_do state) expose the marker reading directly.
+        get_reading = getattr(self.env.unwrapped, "get_gripper_marker_reading", None)
+        if get_reading is not None:
+            reading = get_reading()
+            if reading is not None and reading["width_m"] is not None:
+                if reading["percent_closed"] is not None:
+                    percent_closed = reading["percent_closed"]
+                title_suffix = f", {reading['width_m'] * 1000:.1f} mm" + (
+                    "" if reading["detected"] else " (tags lost)"
+                )
         self.ax_gripper_marker.clear()
         self.ax_gripper_marker.set_xlim(0, 1)
         self.ax_gripper_marker.set_ylim(0, 100)
         self.ax_gripper_marker.bar(0.5, np.clip(percent_closed, 0, 100), width=0.6)
-        self.ax_gripper_marker.set_title(f"gripper (marker): {percent_closed:.1f}%")
+        self.ax_gripper_marker.set_title(
+            f"gripper (marker): {percent_closed:.1f}%{title_suffix}"
+        )
         plt.draw()
         plt.pause(0.001)
 

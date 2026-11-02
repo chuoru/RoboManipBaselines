@@ -3,8 +3,8 @@
 A task YAML (envs/configs/segments/<Task>.yaml) lists the segments of one
 cycle, e.g. for the exhibition task:
 
-    go_home (scripted) -> grasp (learned) -> lift (scripted) -> go_carry
-    (scripted) -> place (learned) -> retreat (scripted) -> back_home
+    go_home (scripted) -> grasp (learned) -> lift (scripted) -> lift_check
+    -> go_carry (scripted) -> place (learned) -> retreat (scripted) -> back_home
 
 and the runner repeats that cycle. Only the parts of the task that vary
 (where the cup is, where the coaster is) are learned; everything else is a
@@ -13,7 +13,7 @@ before it always brings the arm there), a fixed end condition (the gripper
 closed / opened) and a fixed observation, so its policy can be trained and
 swapped on its own.
 
-Switching rules (doc/segment_dagger_checklist.md, design D5):
+Switching rules (design D5):
   learned -> scripted: on the end condition, drop the rest of the action
     chunk and hold the measured pose; the next scripted segment starts with
     a relative retreat (where the grasp happened differs every time).
@@ -21,10 +21,18 @@ Switching rules (doc/segment_dagger_checklist.md, design D5):
     observation, re-anchor the IK on it, clear every policy buffer, then
     start inferring.
 
+Failures (design D6): a grasp/release check of the finger AprilTags
+(common/utils/GripperCheckUtils.py), a timeout, or -- in train mode only --
+the FAIL pedal run the learned segment's on_fail steps (back to its start
+pose) and retry it; past max_retries the arm stops there and the screen asks
+for the staff. Exhibit mode reacts to nothing but SUCCESS (resume after a
+stop) and Esc, so a visitor on a pedal cannot change what the robot does.
+
 Usage: bin/RolloutSegments.py.
 """
 
 import argparse
+import collections
 import datetime
 import logging
 import logging.handlers
@@ -43,7 +51,9 @@ from ..data.DataKey import DataKey
 from ..data.OperationDataMixin import OperationDataMixin
 from ..manager.DataManager import DataManager
 from ..manager.MotionManager import MotionManager
+from ..utils.DisplayTextUtils import draw_text
 from ..utils.GlobalKeyListener import GlobalKeyListener
+from ..utils.GripperCheckUtils import evaluate_grasp, evaluate_release
 from ..utils.MathUtils import set_random_seed
 from .PhaseBase import PhaseBase
 from .PolicyRunnerBase import make_policy_runner
@@ -56,6 +66,18 @@ from .SegmentPhases import (
     make_primitive_phase,
     resolve_path,
 )
+
+# Failure reasons written to the results and the episode attrs.
+FAIL_REASON_TEXT = {
+    "empty": "empty grasp",
+    "dropped": "dropped while lifting",
+    "not_closed": "gripper did not close",
+    "not_released": "gripper did not open",
+    "undetected": "gripper tags not visible",
+    "timeout": "timeout",
+    "operator": "marked as failed by the operator",
+    "camera": "camera stopped",
+}
 
 
 class SegmentPhaseBase(PhaseBase):
@@ -114,10 +136,15 @@ class MoveToInitSegmentPhase(SegmentPhaseBase):
 class WaitForOperatorPhase(SegmentPhaseBase):
     """Stopped at a safe pose; the operator decides how to continue."""
 
-    def __init__(self, op, label, reason):
+    def __init__(self, op, label, reason, learned_phase=None):
         super().__init__(op, label)
         self.reason = reason
+        self.learned_phase = learned_phase
         self.choice = None
+
+    @property
+    def display_name(self):
+        return "STOPPED"
 
     def start(self):
         super().start()
@@ -136,9 +163,109 @@ class WaitForOperatorPhase(SegmentPhaseBase):
         return self.choice is not None
 
 
+class GripperCheck:
+    """One grasp/release check: wait settle_sec after it starts, then take
+    the median of the raw finger-tag widths over window_sec."""
+
+    def __init__(self, op, kind, undetected="fail", empty_reason="empty"):
+        if kind not in ("grasp_check", "released_check"):
+            raise ValueError(f"Invalid check: {kind} (grasp_check / released_check)")
+        if undetected not in ("pass", "fail", "defer"):
+            raise ValueError(
+                f"Invalid undetected policy: {undetected} (pass / fail / defer)"
+            )
+        self.op = op
+        self.kind = kind
+        self.undetected = undetected
+        self.empty_reason = empty_reason
+
+    def start(self):
+        self.start_time = time.time()
+        self.outcome = None
+
+    def update(self):
+        """None while still measuring, then (passed, fail_reason, info)."""
+        config = self.op.check_config
+        elapsed = time.time() - self.start_time
+        if elapsed < config["settle_sec"] + config["window_sec"]:
+            return None
+        widths = self.op.env.unwrapped.gripper_marker_tracker.get_raw_widths_since(
+            self.start_time + config["settle_sec"]
+        )
+        if self.kind == "grasp_check":
+            result, width, num = evaluate_grasp(
+                widths,
+                config["grasp"]["width_min_m"],
+                config["grasp"]["width_max_m"],
+                config["min_detections"],
+            )
+            passed = result == "grasped"
+            fail_reason = self.empty_reason if result == "empty" else result
+        else:
+            result, width, num = evaluate_release(
+                widths, config["release"]["width_open_min_m"], config["min_detections"]
+            )
+            passed = result == "released"
+            fail_reason = result
+        if result == "undetected":
+            # "defer": treat as passed for now and let a later check (e.g.
+            # after lifting, with the cup clear of the table) decide.
+            passed = self.undetected in ("pass", "defer")
+        info = {
+            "check": self.kind,
+            "check_result": result,
+            "check_width_m": float("nan") if width is None else width,
+            "check_detections": num,
+            "check_frames": len(widths),
+        }
+        width_str = "-" if width is None else f"{width * 1000:.1f} mm"
+        self.op.log(
+            f"{self.kind}: {result} (median width {width_str}, {num}/{len(widths)} frames)"
+        )
+        return passed, None if passed else fail_reason, info
+
+
+class CheckSegmentPhase(SegmentPhaseBase):
+    """A check between scripted segments (e.g. after lifting: still holding
+    the cup?). A failure counts against the learned segment it follows."""
+
+    def __init__(self, op, spec):
+        super().__init__(op, spec["name"])
+        self.spec = spec
+        self.checker = GripperCheck(
+            op,
+            spec.get("check", "grasp_check"),
+            undetected=spec.get("undetected", "fail"),
+            empty_reason=spec.get("fail_reason", "dropped"),
+        )
+        self.owner = None  # set by the runner: the preceding learned phase
+
+    def start(self):
+        super().start()
+        hold_at_measured(self.op, refresh_obs=False)
+        self.result = None
+        self.fail_reason = None
+        self.check_info = {}
+        if not self.op.checks_enabled:
+            self.result = "success"
+            return
+        self.checker.start()
+
+    def post_update(self):
+        if self.result is not None:
+            return
+        outcome = self.checker.update()
+        if outcome is not None:
+            passed, self.fail_reason, self.check_info = outcome
+            self.result = "success" if passed else "failure"
+
+    def check_transition(self):
+        return self.result is not None
+
+
 class LearnedSegmentPhase(SegmentPhaseBase):
     """A learned segment: settle -> run the policy (or the operator, with
-    --replace_learned_with_teleop) until the end condition -> result."""
+    --replace_learned_with_teleop) until the end condition -> check -> result."""
 
     # Settling before the first inference: the arm must be still (all joint
     # speeds below this [rad/s]) for SETTLE_STILL_TICKS consecutive ticks,
@@ -158,16 +285,29 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         self.max_retries = int(spec.get("max_retries", 2))
         self.on_fail_specs = spec.get("on_fail", [])
         self.teleop_only = policy_runner is None
+        self.checker = None
+        if spec.get("check") is not None:
+            self.checker = GripperCheck(
+                op,
+                spec["check"],
+                undetected=spec.get("check_undetected", "defer"),
+                empty_reason="empty",
+            )
 
     @property
     def display_name(self):
         return f"{self.label} [{self.state}]"
+
+    @property
+    def is_recording_state(self):
+        return self.state == "run"
 
     def start(self):
         super().start()
         self.state = "settle"
         self.result = None
         self.fail_reason = None
+        self.check_info = {}
         self.settle_ticks = 0
         self.still_ticks = 0
         self.done_count = 0
@@ -201,9 +341,14 @@ class LearnedSegmentPhase(SegmentPhaseBase):
                 self.op.log(
                     f"[{self.label}] End condition '{self.done_condition}' met."
                 )
-                self.finish("success")
+                self.end_run()
             elif self.timeout_s is not None and self.run_time > self.timeout_s:
-                self.finish("failure", "timeout")
+                self.end_run("timeout")
+        elif self.state == "check":
+            outcome = self.checker.update()
+            if outcome is not None:
+                passed, fail_reason, self.check_info = outcome
+                self.finish("success" if passed else "failure", fail_reason)
 
     def _update_settle(self):
         self.settle_ticks += 1
@@ -231,7 +376,7 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         self.state = "run"
         self.last_tick_time = None
         self.op.start_segment_recording(self)
-        who = "operator (SpaceMouse)" if self.human_control else "policy"
+        who = "operator" if self.human_control else "policy"
         self.op.log(f"[{self.label}] Start ({who} in control).")
 
     def _is_done(self):
@@ -254,22 +399,43 @@ class LearnedSegmentPhase(SegmentPhaseBase):
         if self.state != "run":
             return
         if "fail" in actions and self.op.is_action_enabled("fail"):
-            self.finish("failure", "operator")
-        elif "success" in actions:
+            self.end_run("operator")
+        elif "success" in actions and self.op.args.mode != "exhibit":
             self.op.log(f"[{self.label}] Marked as success by the operator.")
-            self.finish("success")
+            self.end_run(check=False)
 
-    def finish(self, result, fail_reason=None):
+    def stop_control(self):
         # Learned -> scripted (D5): drop the rest of the chunk, hold here.
         if self.policy_runner is not None:
             self.policy_runner.hold_current_command(self.op)
         else:
             hold_at_measured(self.op, refresh_obs=False)
+
+    def end_run(self, fail_reason=None, check=True):
+        """Stop the run; on success go through the check (if any)."""
+        self.stop_control()
+        if fail_reason is not None:
+            self.finish("failure", fail_reason)
+        elif check and self.checker is not None and self.op.checks_enabled:
+            self.state = "check"
+            self.checker.start()
+        else:
+            self.finish("success")
+
+    def finish(self, result, fail_reason=None):
         self.state = "done"
         self.result = result
         self.fail_reason = fail_reason
         if result == "failure":
-            self.op.log(f"[{self.label}] FAILED ({fail_reason}).")
+            self.op.log(
+                f"[{self.label}] FAILED: {FAIL_REASON_TEXT.get(fail_reason, fail_reason)}."
+            )
+
+    def abort(self, fail_reason):
+        """Stop at once, from outside (e.g. the camera stopped)."""
+        if self.state in ("settle", "run", "check"):
+            self.stop_control()
+            self.finish("failure", fail_reason)
 
     def check_transition(self):
         return self.result is not None
@@ -286,8 +452,7 @@ class SegmentRunnerBase(OperationDataMixin):
         self.setup_logger()
         self.load_task()
 
-        render_mode = None
-        self.setup_env(render_mode=render_mode)
+        self.setup_env(render_mode=None)
         self.demo_name = self.task_name
 
         self.motion_manager = self.MotionManagerClass(self.env)
@@ -296,6 +461,7 @@ class SegmentRunnerBase(OperationDataMixin):
         self.obs, self.info = self.env.reset(seed=self.args.seed)
         self.reward = 0.0
 
+        self.setup_checks()
         self.setup_key_listener()
         self.setup_teleop_device()
         self.build_phases()
@@ -331,6 +497,13 @@ class SegmentRunnerBase(OperationDataMixin):
             help="override the checkpoint of a learned segment, e.g. grasp=./checkpoint/...",
         )
         parser.add_argument(
+            "--poses",
+            type=str,
+            default=None,
+            help="named pose YAML to use instead of the task YAML's poses "
+            "(e.g. ./envs/configs/poses/DryRunExample.yaml for a dry run)",
+        )
+        parser.add_argument(
             "--replace_learned_with_teleop",
             action="store_true",
             help="drive every learned segment with the SpaceMouse instead of a "
@@ -338,11 +511,11 @@ class SegmentRunnerBase(OperationDataMixin):
             "cycle before any policy exists",
         )
         parser.add_argument(
-            "--poses",
-            type=str,
-            default=None,
-            help="named pose YAML to use instead of the task YAML's poses "
-            "(e.g. ./envs/configs/poses/DryRunExample.yaml for a dry run)",
+            "--skip_checks",
+            action="store_true",
+            help="run without the finger-tag grasp/release checks (only "
+            "timeouts and the FAIL pedal detect failures). Not allowed in "
+            "exhibit mode.",
         )
         parser.add_argument(
             "--input_device",
@@ -415,6 +588,12 @@ class SegmentRunnerBase(OperationDataMixin):
             help="cycle results YAML (default: ./logs/segment_results_<Task>_<time>.yaml)",
         )
         parser.add_argument(
+            "--camera_timeout",
+            type=float,
+            default=3.0,
+            help="stop for the operator if the camera delivers no frame for this long [s]",
+        )
+        parser.add_argument(
             "--window_width",
             type=int,
             default=960,
@@ -431,6 +610,12 @@ class SegmentRunnerBase(OperationDataMixin):
             self.args.seed = int(time.time()) % (2**32)
         if self.args.save_rollout is None:
             self.args.save_rollout = self.args.mode == "exhibit"
+        if self.args.mode == "exhibit" and self.args.skip_checks:
+            parser.error("--skip_checks is not allowed with --mode exhibit")
+        if self.args.mode == "exhibit" and self.args.replace_learned_with_teleop:
+            parser.error(
+                "--replace_learned_with_teleop is not allowed with --mode exhibit"
+            )
 
     def set_additional_args(self, parser):
         pass
@@ -479,6 +664,19 @@ class SegmentRunnerBase(OperationDataMixin):
                 self.task_config.get("control_period", 0.2)
             )
 
+        # Finger-tag config: detection settings for the env, thresholds for
+        # the checks. The env is built after this, from the Operation's
+        # gripper_marker_config -- fill that in unless the env config set one.
+        self.gripper_marker_path = None
+        if self.task_config.get("gripper_marker") is not None:
+            self.gripper_marker_path = resolve_path(
+                self.task_config["gripper_marker"], task_dir
+            )
+            if getattr(self, "gripper_marker_config", None) is None and hasattr(
+                self, "gripper_marker_config"
+            ):
+                self.gripper_marker_config = self.gripper_marker_path
+
         checkpoint_overrides = {}
         for item in self.args.checkpoint:
             if "=" not in item:
@@ -504,13 +702,20 @@ class SegmentRunnerBase(OperationDataMixin):
         names = [spec.get("name") for spec in self.segment_specs]
         if None in names or len(set(names)) != len(names):
             raise ValueError(f"Every segment needs a unique name: {names}")
+        seen_learned = False
         for idx, spec in enumerate(self.segment_specs):
             if spec.get("type") not in ("scripted_move", "gripper", "learned", "check"):
                 raise ValueError(
                     f"Segment '{spec['name']}' has an invalid type: {spec}"
                 )
+            if spec["type"] == "check" and not seen_learned:
+                raise ValueError(
+                    f"Check segment '{spec['name']}' must come after a learned segment "
+                    "(its failure retries that segment)."
+                )
             if spec["type"] != "learned":
                 continue
+            seen_learned = True
             next_spec = self.segment_specs[(idx + 1) % len(self.segment_specs)]
             if not (
                 next_spec.get("type") == "scripted_move" and "rel_xyz" in next_spec
@@ -522,6 +727,63 @@ class SegmentRunnerBase(OperationDataMixin):
                     f"WARNING: learned segment '{spec['name']}' is not followed by a "
                     "relative retreat (rel_xyz)."
                 )
+
+    def uses_checks(self):
+        return any(
+            spec["type"] == "check" or spec.get("check") is not None
+            for spec in self.segment_specs
+        )
+
+    def setup_checks(self):
+        """Enable the finger-tag checks, or explain why they cannot run."""
+        self.checks_enabled = False
+        self.check_config = None
+        if not self.uses_checks():
+            return
+        if self.args.skip_checks:
+            self.log("WARNING: grasp/release checks disabled (--skip_checks).")
+            return
+        problems = []
+        if not getattr(self.env.unwrapped, "has_gripper_marker_tracking", False):
+            problems.append(
+                "the env has no finger-tag tracking (set gripper_marker in the task "
+                "YAML or gripper_marker_config in the env config)"
+            )
+        if self.gripper_marker_path is None:
+            problems.append(
+                "the task YAML has no gripper_marker file (check thresholds)"
+            )
+        else:
+            with open(self.gripper_marker_path, "r") as f:
+                self.check_config = (yaml.safe_load(f) or {}).get("checks")
+            needed = [
+                ("grasp", "width_min_m"),
+                ("grasp", "width_max_m"),
+                ("release", "width_open_min_m"),
+            ]
+            if self.check_config is None:
+                problems.append(f"{self.gripper_marker_path} has no 'checks' section")
+            else:
+                missing = [
+                    f"{group}.{key}"
+                    for group, key in needed
+                    if (self.check_config.get(group) or {}).get(key) is None
+                ]
+                if missing:
+                    problems.append(
+                        f"thresholds not calibrated in {self.gripper_marker_path}: "
+                        f"{', '.join(missing)} (misc/CalibrateGripperMarkerWidth.py)"
+                    )
+        if problems:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] The task uses grasp/release checks but "
+                + "; ".join(problems)
+                + ". Pass --skip_checks to run without them (train mode only)."
+            )
+        self.check_config.setdefault("settle_sec", 0.6)
+        self.check_config.setdefault("window_sec", 1.0)
+        self.check_config.setdefault("min_detections", 3)
+        self.checks_enabled = True
 
     def setup_key_listener(self):
         self.key_listener = None
@@ -600,15 +862,21 @@ class SegmentRunnerBase(OperationDataMixin):
     def build_phases(self):
         self.policy_runners = {}
         self.segment_phases = []
+        last_learned = None
+        self.dependent_checks = collections.defaultdict(list)
         for spec in self.segment_specs:
             if spec["type"] == "learned":
-                self.segment_phases.append(self.make_learned_phase(spec))
+                phase = self.make_learned_phase(spec)
+                last_learned = phase
+            elif spec["type"] == "check":
+                phase = CheckSegmentPhase(self, spec)
+                phase.owner = last_learned
+                self.dependent_checks[last_learned.label].append(phase.label)
             else:
-                self.segment_phases.append(
-                    make_primitive_phase(
-                        self, spec, self.named_poses, label=spec["name"]
-                    )
+                phase = make_primitive_phase(
+                    self, spec, self.named_poses, label=spec["name"]
                 )
+            self.segment_phases.append(phase)
         self.on_fail_phases = {
             spec["name"]: [
                 make_primitive_phase(self, step, self.named_poses)
@@ -654,12 +922,14 @@ class SegmentRunnerBase(OperationDataMixin):
         ]
         self.retry_count = {}
         self.cycle_result = None
+        self.held_episodes = {}
         self.stats = {
             "cycles": 0,
             "cycles_without_stop": 0,
             "consecutive_successes": 0,
             "stops": 0,
         }
+        self.segment_stats = {}
         self.start_cycle()
         self.phase = None
         self.next_phase()
@@ -671,6 +941,7 @@ class SegmentRunnerBase(OperationDataMixin):
             "start_time": datetime.datetime.now().isoformat(timespec="seconds"),
             "segments": {},
             "stopped": False,
+            "stop_reason": None,
         }
         self.cycle_start_time = time.time()
 
@@ -681,17 +952,21 @@ class SegmentRunnerBase(OperationDataMixin):
             self.phase = self.segment_phases[self.segment_idx]
         self.phase.start()
 
+    def is_current_segment(self, phase):
+        return self.segment_idx < len(self.segment_phases) and (
+            phase is self.segment_phases[self.segment_idx]
+        )
+
     def on_phase_done(self, phase):
-        if (
-            phase in self.segment_phases
-            and phase is self.segment_phases[self.segment_idx]
-        ):
+        if isinstance(phase, WaitForOperatorPhase):
+            self.on_operator_choice(phase)
+        elif self.is_current_segment(phase):
             if isinstance(phase, LearnedSegmentPhase):
                 self.on_learned_done(phase)
+            elif isinstance(phase, CheckSegmentPhase):
+                self.on_check_done(phase)
             else:
                 self.advance_segment()
-        elif isinstance(phase, WaitForOperatorPhase):
-            self.on_operator_choice(phase)
         if self.quit_flag:
             return
         self.next_phase()
@@ -701,16 +976,74 @@ class SegmentRunnerBase(OperationDataMixin):
             name, {"result": None, "attempts": 0, "fail_reasons": []}
         )
 
+    def segment_stat(self, name):
+        return self.segment_stats.setdefault(
+            name,
+            {
+                "attempts": 0,
+                "success_first_try": 0,
+                "success_after_retry": 0,
+                "stopped": 0,
+                "fail_reasons": {},
+            },
+        )
+
+    def count_failure(self, name, reason):
+        record = self.segment_record(name)
+        record["result"] = "failure"
+        record["fail_reasons"].append(reason)
+        reasons = self.segment_stat(name)["fail_reasons"]
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+    def count_success(self, name):
+        record = self.segment_record(name)
+        record["result"] = "success"
+        stat = self.segment_stat(name)
+        if self.retry_count.get(name, 0) == 0:
+            stat["success_first_try"] += 1
+        else:
+            stat["success_after_retry"] += 1
+
     def on_learned_done(self, phase):
-        record = self.segment_record(phase.label)
-        record["attempts"] += 1
-        record["result"] = phase.result
-        self.finish_segment_recording(phase)
+        name = phase.label
+        self.segment_record(name)["attempts"] += 1
+        self.segment_stat(name)["attempts"] += 1
+        episode = self.take_segment_recording(phase)
         if phase.result == "success":
+            if self.dependent_checks.get(name):
+                # Not final yet: a later check (e.g. after lifting) may still
+                # turn this grasp into a failure. Label the episode then.
+                self.held_episodes[name] = (episode, list(self.dependent_checks[name]))
+            else:
+                self.commit_episode(episode, "success")
+                self.count_success(name)
             self.advance_segment()
         else:
-            record["fail_reasons"].append(phase.fail_reason)
+            self.commit_episode(episode, "failure", phase.fail_reason)
+            self.count_failure(name, phase.fail_reason)
             self.fail_segment(phase, phase.fail_reason)
+
+    def on_check_done(self, phase):
+        owner = phase.owner.label
+        held = self.held_episodes.get(owner)
+        if phase.result == "success":
+            if held is not None:
+                episode, remaining = held
+                remaining = [name for name in remaining if name != phase.label]
+                if remaining:
+                    self.held_episodes[owner] = (episode, remaining)
+                else:
+                    del self.held_episodes[owner]
+                    self.commit_episode(episode, "success")
+                    self.count_success(owner)
+            self.advance_segment()
+        else:
+            if held is not None:
+                del self.held_episodes[owner]
+                held[0]["meta_data"].update(phase.check_info)
+                self.commit_episode(held[0], "failure", phase.fail_reason)
+            self.count_failure(owner, phase.fail_reason)
+            self.fail_segment(phase.owner, phase.fail_reason)
 
     def fail_segment(self, learned_phase, reason):
         """Run the learned segment's on_fail steps, then retry it -- or, past
@@ -720,11 +1053,14 @@ class SegmentRunnerBase(OperationDataMixin):
         self.segment_idx = self.segment_phases.index(learned_phase)
         self.pending_phases = list(self.on_fail_phases[name])
         if self.retry_count[name] > learned_phase.max_retries:
+            self.segment_stat(name)["stopped"] += 1
             self.pending_phases.append(
                 WaitForOperatorPhase(
                     self,
                     "wait",
-                    f"'{name}' failed {self.retry_count[name]} times (last: {reason})",
+                    f"'{name}' failed {self.retry_count[name]} times "
+                    f"(last: {FAIL_REASON_TEXT.get(reason, reason)})",
+                    learned_phase,
                 )
             )
         else:
@@ -732,9 +1068,25 @@ class SegmentRunnerBase(OperationDataMixin):
                 f"Retry '{name}' ({self.retry_count[name]}/{learned_phase.max_retries})."
             )
 
+    def stop_for_operator(self, reason, fail_reason):
+        """Stop right now (not at a start pose) -- e.g. the camera died."""
+        if isinstance(self.phase, WaitForOperatorPhase):
+            return
+        if isinstance(self.phase, LearnedSegmentPhase) and self.phase.result is None:
+            self.phase.abort(fail_reason)
+            episode = self.take_segment_recording(self.phase)
+            self.commit_episode(episode, "failure", fail_reason)
+            self.count_failure(self.phase.label, fail_reason)
+        else:
+            hold_at_measured(self, refresh_obs=False)
+        self.pending_phases = []
+        self.phase = WaitForOperatorPhase(self, "wait", reason)
+        self.phase.start()
+
     def on_operator_choice(self, phase):
         self.stats["stops"] += 1
         self.cycle_result["stopped"] = True
+        self.cycle_result["stop_reason"] = phase.reason
         self.finish_cycle()
         # Restart the cycle from the top; resume_phases (by default: open the
         # gripper, which the attendant is holding the cup from) first.
@@ -751,7 +1103,16 @@ class SegmentRunnerBase(OperationDataMixin):
         self.finish_cycle()
 
     def finish_cycle(self):
+        # Anything still waiting for a check that never ran is final now.
+        for episode, _ in self.held_episodes.values():
+            self.commit_episode(episode, "success")
+        for name in list(self.held_episodes):
+            self.count_success(name)
+        self.held_episodes = {}
         self.cycle_result["duration"] = round(time.time() - self.cycle_start_time, 2)
+        self.cycle_result["memory_available_gb"] = round(
+            psutil.virtual_memory().available / 1024**3, 2
+        )
         self.cycle_results.append(self.cycle_result)
         self.stats["cycles"] += 1
         if self.cycle_result["stopped"]:
@@ -798,29 +1159,66 @@ class SegmentRunnerBase(OperationDataMixin):
         phase.start_time = self.env.unwrapped.get_time()
         self.recording_phase = phase
 
-    def record_extra_data(self):
-        """Per-step data beyond OperationDataMixin's (extended later)."""
-        pass
+    def is_recording(self):
+        return (
+            self.recording_phase is not None
+            and self.recording_phase is self.phase
+            and self.phase.is_recording_state
+        )
 
-    def finish_segment_recording(self, phase):
+    def record_extra_data(self):
+        """Per-step data beyond OperationDataMixin's: the finger-tag reading."""
+        reading = None
+        if hasattr(self.env.unwrapped, "get_gripper_marker_reading"):
+            reading = self.env.unwrapped.get_gripper_marker_reading()
+        if reading is None:
+            return
+        width = reading["raw_width_m"] if reading["detected"] else None
+        self.data_manager.append_single_data(
+            DataKey.MEASURED_GRIPPER_MARKER_WIDTH,
+            np.array([np.nan if width is None else width], dtype=np.float64),
+        )
+        self.data_manager.append_single_data(
+            DataKey.GRIPPER_MARKER_DETECTED, np.int8(1 if reading["detected"] else 0)
+        )
+
+    def take_segment_recording(self, phase):
+        """Detach the recorded attempt of `phase` (None if nothing recorded)."""
         if self.recording_phase is not phase:
-            return
+            return None
         self.recording_phase = None
-        if len(self.data_manager.all_data_seq.get(DataKey.TIME, [])) == 0:
-            return
-        meta_data = dict(self.data_manager.meta_data)
-        meta_data.update(self.get_segment_meta_data(phase))
-        filename = self.get_segment_filename(phase)
         all_data_seq = self.data_manager.all_data_seq
         self.data_manager.all_data_seq = {}
-        # Video encoding takes seconds; do it off the control loop.
-        self.save_queue.put((filename, all_data_seq, meta_data))
+        if len(all_data_seq.get(DataKey.TIME, [])) == 0:
+            return None
+        meta_data = dict(self.data_manager.meta_data)
+        meta_data.update(self.get_segment_meta_data(phase))
+        meta_data.update(phase.check_info)
+        return {
+            "all_data_seq": all_data_seq,
+            "meta_data": meta_data,
+            "segment": phase.label,
+            "cycle_idx": self.cycle_idx,
+            "retry_idx": self.retry_count.get(phase.label, 0),
+        }
+
+    def commit_episode(self, episode, result, fail_reason=None):
+        """Label and save a detached attempt (in the background: video
+        encoding takes seconds)."""
+        if episode is None:
+            return
+        episode["meta_data"]["segment_result"] = result
+        episode["meta_data"]["fail_reason"] = fail_reason or ""
+        filename = self.get_segment_filename(
+            episode["segment"], episode["cycle_idx"], episode["retry_idx"], result
+        )
+        self.save_queue.put((filename, episode["all_data_seq"], episode["meta_data"]))
 
     def get_segment_meta_data(self, phase):
         name = phase.label
         return {
             "segment": name,
-            "segment_result": phase.result,
+            "segment_result": phase.result or "",
             "fail_reason": phase.fail_reason or "",
             "retry_idx": self.retry_count.get(name, 0),
             "cycle_idx": self.cycle_idx,
@@ -832,17 +1230,16 @@ class SegmentRunnerBase(OperationDataMixin):
             "teleop_only": bool(phase.teleop_only),
         }
 
-    def get_segment_filename(self, phase):
+    def get_segment_filename(self, name, cycle_idx, retry_idx, result):
         dataset_dir = self.args.dataset_dir
         if dataset_dir is None:
             dataset_dir = os.path.join(PACKAGE_DIR, "dataset")
-        name = phase.label
         return os.path.normpath(
             os.path.join(
                 os.path.expanduser(dataset_dir),
                 f"{self.task_name}_{name}_rollout_iter{self.args.iteration:03d}",
                 f"{self.task_name}_{name}_{self.datetime_now:%Y%m%d_%H%M%S}_"
-                f"c{self.cycle_idx:04d}_r{self.retry_count.get(name, 0)}_{phase.result}.rmb",
+                f"c{cycle_idx:04d}_r{retry_idx}_{result}.rmb",
             )
         )
 
@@ -870,6 +1267,7 @@ class SegmentRunnerBase(OperationDataMixin):
                     "task": self.task_name,
                     "mode": self.args.mode,
                     "stats": self.stats,
+                    "segments": self.segment_stats,
                     "cycles": self.cycle_results,
                 },
                 f,
@@ -910,10 +1308,13 @@ class SegmentRunnerBase(OperationDataMixin):
                 ]
             )
 
-            if self.recording_phase is not None and self.recording_phase is self.phase:
+            if self.is_recording():
                 if self._is_memory_low():
-                    self.log("Available memory is low -- cutting the recording short.")
-                    self.finish_segment_recording(self.phase)
+                    self.log(
+                        "Available memory is low -- recording of this attempt stops here."
+                    )
+                    self.recording_phase = None
+                    self.data_manager.reset()
                 else:
                     self.record_data()
                     self.record_extra_data()
@@ -921,6 +1322,10 @@ class SegmentRunnerBase(OperationDataMixin):
             self.obs, self.reward, _, _, self.info = self.env.step(env_action)
 
             self.phase.post_update()
+
+            camera_problem = self.check_camera()
+            if camera_problem is not None:
+                self.stop_for_operator(camera_problem, "camera")
 
             self.draw_image()
             self.key = cv2.waitKey(1)
@@ -943,6 +1348,18 @@ class SegmentRunnerBase(OperationDataMixin):
             psutil.virtual_memory().available < self.MIN_AVAILABLE_MEMORY_GB * 1024**3
         )
 
+    def check_camera(self):
+        """A reason string if a camera has stopped delivering frames."""
+        cameras = getattr(self.env.unwrapped, "pointcloud_cameras", {}) or {}
+        now = time.time()
+        for name, camera in cameras.items():
+            last_frame_time = camera.get("last_frame_time")
+            if last_frame_time is None:
+                continue
+            if now - last_frame_time > self.args.camera_timeout:
+                return f"camera '{name}' has delivered no frame for {now - last_frame_time:.0f} s"
+        return None
+
     def shutdown(self):
         # Stop the arm where it is before anything else.
         try:
@@ -951,9 +1368,29 @@ class SegmentRunnerBase(OperationDataMixin):
             print(f"[{self.__class__.__name__}] Could not hold the arm: {e}")
         if self.recording_phase is not None:
             phase = self.recording_phase
-            if phase.result is None:
-                phase.result = "interrupted"
-            self.finish_segment_recording(phase)
+            episode = self.take_segment_recording(phase)
+            self.commit_episode(
+                episode, phase.result or "interrupted", phase.fail_reason
+            )
+        for episode, _ in self.held_episodes.values():
+            self.commit_episode(episode, "success")
+        self.held_episodes = {}
+        # The cycle in progress (possibly stopped and waiting) is recorded too.
+        if self.cycle_result is not None and self.cycle_result["segments"]:
+            self.cycle_result["incomplete"] = True
+            self.cycle_result["duration"] = round(
+                time.time() - self.cycle_start_time, 2
+            )
+            if isinstance(self.phase, WaitForOperatorPhase):
+                self.cycle_result["stopped"] = True
+                self.cycle_result["stop_reason"] = self.phase.reason
+            self.cycle_results.append(self.cycle_result)
+            self.cycle_result = None
+        tracker = getattr(self.env.unwrapped, "gripper_marker_tracker", None)
+        if tracker is not None and hasattr(tracker, "get_detect_time_ms"):
+            detect_ms = tracker.get_detect_time_ms()
+            if detect_ms is not None:
+                self.log(f"Finger-tag detection: median {detect_ms:.0f} ms per frame.")
         self.save_queue.put(None)
         self.save_thread.join()
         self.save_results()
@@ -970,7 +1407,7 @@ class SegmentRunnerBase(OperationDataMixin):
 
     def get_status_lines(self):
         lines = [
-            f"{self.task_name}  [{self.args.mode.upper()}]  cycle {self.cycle_idx}",
+            f"{self.task_name}  [{self.args.mode.upper()}]  cycle {self.cycle_idx + 1}",
             f"segment: {self.phase.display_name}",
         ]
         if self.stats["cycles"] > 0:
@@ -979,6 +1416,8 @@ class SegmentRunnerBase(OperationDataMixin):
                 f"streak: {self.stats['consecutive_successes']}   "
                 f"success: {self.stats['cycles_without_stop']}/{self.stats['cycles']} ({rate:.0f}%)"
             )
+        else:
+            lines.append("")
         return lines
 
     def get_camera_image(self):
@@ -999,16 +1438,35 @@ class SegmentRunnerBase(OperationDataMixin):
         else:
             height = int(width * image.shape[0] / image.shape[1])
             canvas = cv2.resize(image, (width, height))
-        panel = np.full((40 * 3 + 20, width, 3), 255, dtype=np.uint8)
-        for idx, line in enumerate(self.get_status_lines()):
-            cv2.putText(
-                panel,
-                line,
-                (10, 35 + 40 * idx),
-                cv2.FONT_HERSHEY_DUPLEX,
-                0.9,
-                (0, 0, 0),
-                2,
-            )
+        self.draw_overlay(canvas)
+
+        line_height = 44 if self.args.mode == "exhibit" else 36
+        lines = self.get_status_lines()
+        panel = np.full((line_height * len(lines) + 16, width, 3), 255, dtype=np.uint8)
+        for idx, line in enumerate(lines):
+            draw_text(panel, line, (12, 8 + line_height * idx), size=line_height - 8)
         window_image = cv2.vconcat([canvas, panel])
         cv2.imshow("segments", cv2.cvtColor(window_image, cv2.COLOR_RGB2BGR))
+
+    def draw_overlay(self, canvas):
+        """Banners on the camera image (stop / intervention)."""
+        if isinstance(self.phase, WaitForOperatorPhase):
+            height, width = canvas.shape[:2]
+            canvas[: height // 3] = (
+                canvas[: height // 3] * 0.3 + np.array([200, 30, 30]) * 0.7
+            ).astype(np.uint8)
+            draw_text(
+                canvas,
+                "係員を呼んでください",
+                (20, 16),
+                size=max(width // 16, 24),
+                color=(255, 255, 255),
+                fallback_text="PLEASE CALL STAFF",
+            )
+            draw_text(
+                canvas,
+                self.phase.reason,
+                (20, 16 + max(width // 16, 24) + 12),
+                size=22,
+                color=(255, 255, 255),
+            )
