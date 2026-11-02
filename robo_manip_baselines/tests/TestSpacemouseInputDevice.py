@@ -128,6 +128,54 @@ class TestSpacemouseInputDevice(unittest.TestCase):
         )
         np.testing.assert_allclose(arm.target_se3.rotation, expected, atol=1e-12)
 
+    def test_tool_control_frame_translation_follows_the_view(self):
+        device, arm = make_device(control_frame="tool", pos_scale=0.1)
+        rotation = pin.rpy.rpyToMatrix(np.pi, 0.0, np.pi / 2)  # pointing down
+        arm.target_se3 = pin.SE3(rotation, np.array([0.3, 0.0, 0.2]))
+        # cap forward = image up = tool -y; right = tool +x; down = tool +z
+        for state, tool_dir in (
+            (make_state(y=1.0), [0.0, -1.0, 0.0]),
+            (make_state(x=1.0), [1.0, 0.0, 0.0]),
+            (make_state(z=-1.0), [0.0, 0.0, 1.0]),
+        ):
+            start = arm.target_se3.translation.copy()
+            device.state = state
+            device.set_command_data()
+            np.testing.assert_allclose(
+                arm.target_se3.translation - start,
+                0.1 * rotation @ np.array(tool_dir),
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(arm.target_se3.rotation, rotation, atol=1e-12)
+
+    def test_tool_control_frame_rotation_pivots_about_the_tcp(self):
+        device, arm = make_device(control_frame="tool", rpy_scale=0.1)
+        rotation = pin.rpy.rpyToMatrix(np.pi, 0.0, 0.0)
+        arm.target_se3 = pin.SE3(rotation, np.array([0.3, 0.1, 0.2]))
+        device.state = make_state(yaw=0.5)  # twist: about the view axis
+        device.set_command_data()
+        # the controlled point (TCP) stays put
+        np.testing.assert_allclose(arm.target_se3.translation, [0.3, 0.1, 0.2])
+        # world mode turns -2 * 0.5 * 0.1 about +z (up); the same twist turns
+        # the view the same way, i.e. about tool -z ... which is base +z here
+        expected = rotation @ pin.exp3(np.array([0.0, 0.0, 0.1]))
+        np.testing.assert_allclose(arm.target_se3.rotation, expected, atol=1e-12)
+        world_device, world_arm = make_device(rpy_scale=0.1)
+        world_arm.target_se3 = pin.SE3(rotation, np.zeros(3))
+        world_device.state = make_state(yaw=0.5)
+        world_device.set_command_data()
+        np.testing.assert_allclose(world_arm.target_se3.rotation, expected, atol=1e-12)
+
+    def test_tool_view_yaw(self):
+        device, arm = make_device(
+            control_frame="tool", pos_scale=0.1, tool_view_yaw_deg=90.0
+        )
+        device.state = make_state(x=1.0)  # image right = tool +y after 90 deg
+        device.set_command_data()
+        np.testing.assert_allclose(
+            arm.target_se3.translation, [0.0, 0.1, 0.0], atol=1e-12
+        )
+
     def test_connect_without_device_params_and_failure(self):
         fake = types.ModuleType("pyspacemouse")
         fake.open = mock.Mock(return_value=object())

@@ -36,11 +36,21 @@ deadzone: 0.08
 # EMA on the axes (1.0 = off).
 smoothing_alpha: 0.5
 
-# x, y, z, roll, pitch, yaw. Set roll/pitch to 0 to keep the gripper pointing
-# straight down if the task never needs a tilt.
+# x, y, z, roll, pitch, yaw. Set roll/pitch to 0 to keep the gripper from
+# tilting if the task never needs a tilt.
 axis_sign: [1, 1, 1, 1, 1, 1]
 axis_enable: [1, 1, 1, 1, 1, 1]
-rotation_frame: world
+
+# The operator watches the hand-camera image, so move the TCP in its own
+# frame as if the cap were that camera seen from behind: cap forward = image
+# up, cap right = image right, cap pushed down = towards the scene, twist and
+# tilts turn the view the same way. Rotations pivot about the fingertips
+# because the env config's ik_eef_offset_pose puts the controlled point there.
+control_frame: tool
+# How the hand camera is mounted about the tool z axis [deg]. If cap right
+# moves the image up / down / left instead of right, set +90 / -90 / 180
+# (or the measured angle in between).
+tool_view_yaw_deg: 0.0
 
 # Binary tool_do gripper: left button toggles open (0) / closed (100).
 gripper_mode: toggle

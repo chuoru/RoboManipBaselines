@@ -40,7 +40,23 @@ class SpacemouseInputDevice(InputDeviceBase):
         axis_enable=None,
         # "world": rotation deltas are applied in the robot base frame (the
         # original behaviour). "tool": in the end-effector's own frame.
+        # Only used with control_frame "world".
         rotation_frame="world",
+        # "world": the original mapping, translation in the robot base frame
+        # (rotation per rotation_frame). "tool": translation AND rotation in
+        # the controlled point's own frame, mapped as if the cap were the
+        # hand camera seen from behind -- for an operator who watches the
+        # hand-camera image, assuming the camera looks along the tool +z axis:
+        # cap forward = image up (tool -y), cap right = image right (tool
+        # +x), cap pushed down = towards the scene (tool +z). Since the
+        # controlled point does not translate under a rotation, rotations
+        # pivot about it (set ik_eef_offset_pose to the fingertips).
+        control_frame="world",
+        # control_frame "tool" only: rotation [deg] about the tool z axis from
+        # the tool x/y axes to the image right/down directions, i.e. how the
+        # camera is mounted. Tune it on the real arm until cap right moves the
+        # image right; flip single axes with axis_sign.
+        tool_view_yaw_deg=0.0,
         # "incremental": the original behaviour (button 0 closes, the last
         # button opens, by gripper_scale per tick while held). "toggle": a
         # press of gripper_button (rising edge) flips the command between
@@ -92,6 +108,18 @@ class SpacemouseInputDevice(InputDeviceBase):
                 f"[{self.__class__.__name__}] Invalid rotation_frame: {rotation_frame}"
             )
         self.rotation_frame = rotation_frame
+        if control_frame not in ("world", "tool"):
+            raise ValueError(
+                f"[{self.__class__.__name__}] Invalid control_frame: {control_frame}"
+            )
+        self.control_frame = control_frame
+        # Device frame (x right, y forward, z up) -> tool frame: a half turn
+        # about x (forward -> image up = -y, up -> away from the scene = -z),
+        # then the camera mounting yaw. A proper rotation, so it maps the
+        # rotation axes with the same handedness as the translations.
+        self.tool_view_rotation = pin.rpy.rpyToMatrix(
+            0.0, 0.0, np.deg2rad(tool_view_yaw_deg)
+        ) @ np.diag([1.0, -1.0, -1.0])
         if gripper_mode not in ("incremental", "toggle"):
             raise ValueError(
                 f"[{self.__class__.__name__}] Invalid gripper_mode: {gripper_mode}"
@@ -237,27 +265,41 @@ class SpacemouseInputDevice(InputDeviceBase):
             rpy_gain *= self.precision_scale
 
         # Set arm command
-        delta_pos = pos_gain * np.array(
-            [
-                -1.0 * axes[1],
-                axes[0],
-                axes[2],
-            ]
-        )
-        delta_rpy = rpy_gain * np.array(
-            [
-                -1.0 * axes[3],
-                -1.0 * axes[4],
-                -2.0 * axes[5],
-            ]
-        )
-
         target_se3 = self.arm_manager.target_se3.copy()
-        target_se3.translation += delta_pos
-        if self.rotation_frame == "world":
-            target_se3.rotation = pin.rpy.rpyToMatrix(*delta_rpy) @ target_se3.rotation
+        if self.control_frame == "world":
+            delta_pos = pos_gain * np.array(
+                [
+                    -1.0 * axes[1],
+                    axes[0],
+                    axes[2],
+                ]
+            )
+            delta_rpy = rpy_gain * np.array(
+                [
+                    -1.0 * axes[3],
+                    -1.0 * axes[4],
+                    -2.0 * axes[5],
+                ]
+            )
+
+            target_se3.translation += delta_pos
+            if self.rotation_frame == "world":
+                target_se3.rotation = (
+                    pin.rpy.rpyToMatrix(*delta_rpy) @ target_se3.rotation
+                )
+            else:
+                target_se3.rotation = target_se3.rotation @ pin.rpy.rpyToMatrix(
+                    *delta_rpy
+                )
         else:
-            target_se3.rotation = target_se3.rotation @ pin.rpy.rpyToMatrix(*delta_rpy)
+            # Rotation vector in the device frame, with the same axis signs
+            # as the "world" mapping above (which is this vector rotated by
+            # +90 deg about z): pitch about x, roll about y, yaw (2x) about z.
+            device_rot = np.array([-1.0 * axes[4], axes[3], -2.0 * axes[5]])
+            delta_pos = pos_gain * (self.tool_view_rotation @ axes[0:3])
+            delta_rot = rpy_gain * (self.tool_view_rotation @ device_rot)
+            target_se3.translation += target_se3.rotation @ delta_pos
+            target_se3.rotation = target_se3.rotation @ pin.exp3(delta_rot)
 
         self.arm_manager.set_command_eef_pose(target_se3)
 

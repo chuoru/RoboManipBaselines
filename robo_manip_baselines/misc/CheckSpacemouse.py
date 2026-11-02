@@ -1,6 +1,7 @@
 """Check the SpaceMouse without the robot: open it with a teleop config and
 print, live, the command it would send -- linear velocity [m/s] and angular
-velocity [deg/s] in the robot base frame, the gripper command and the
+velocity [deg/s] in the frame the config commands in (robot base frame, or
+the tool frame with control_frame: tool), the gripper command and the
 precision mode.
 
 The values go through exactly the processing teleop uses (deadzone,
@@ -61,8 +62,15 @@ if __name__ == "__main__":
     device = SpacemouseInputDevice(arm_manager, **config)
     device.connect()
     print(f"Opened the SpaceMouse with {args.input_device_config}. Ctrl+C to quit.")
+    # The dummy target starts at identity, so base and tool frame coincide
+    # and the printed vectors are in the frame the config commands in.
+    if device.control_frame == "tool":
+        frame = "tool frame (x: image right, y: image down, z: towards the scene)"
+    else:
+        frame = "robot base frame"
     print(
-        "base-frame command: lin [m/s] x y z | ang [deg/s] x y z | gripper | precision | raw buttons"
+        f"command in the {frame}:\n"
+        "lin [m/s] x y z | ang [deg/s] x y z | gripper | precision | raw buttons"
     )
 
     period = 1.0 / args.rate

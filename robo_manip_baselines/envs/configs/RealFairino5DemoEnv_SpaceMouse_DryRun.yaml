@@ -7,7 +7,8 @@ dry_run: true
 gripper_type: "tool_do"
 tool_do_close_threshold: 50.0
 tool_do_closed_percent: 100.0
-ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+# Fingertips, as in RealFairino5DemoEnv_SpaceMouse.yaml.
+ik_eef_offset_pose: [0.0, 0.0, 0.25, 1.0, 0.0, 0.0, 0.0]
 command_log_path: "./logs/command_log_dryrun.csv"
 time_scale: 1.0
 joint_vel_limit_scale: 1.0

@@ -5,8 +5,8 @@
 # trained on (camera profile, exposure, background mask, TCP, gripper state
 # encoding). Do not deploy these policies with a different env config.
 #
-# Camera settings, background mask and ik_eef_offset_pose are the same as
-# RealFairino5DemoEnv_UmiPolicy_BgMask_5Hz.yaml.
+# Camera settings and background mask are the same as
+# RealFairino5DemoEnv_UmiPolicy_BgMask_5Hz.yaml; the TCP is not (see below).
 robot_ip: "192.168.57.2"
 
 # The arm-mounted Orbbec Gemini (see RealFairino5DemoEnv_UmiPolicy.yaml).
@@ -33,8 +33,13 @@ gripper_type: "tool_do"
 tool_do_close_threshold: 50.0
 tool_do_closed_percent: 100.0
 
-# IK controlled point = tool flange face centre (same as the UMI configs).
-ik_eef_offset_pose: [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+# IK controlled point = the IAI gripper's fingertips: the URDF ends at the
+# joint-6 origin, 100 mm behind the flange face, and the fingertips are
+# 150 mm beyond the flange face. Unlike the UMI configs (flange face), so
+# SpaceMouse rotations pivot about the fingertips instead of swinging them.
+# The controller's own TCP (tool 0) is left at the flange; this offset is
+# applied in our IK only.
+ik_eef_offset_pose: [0.0, 0.0, 0.25, 1.0, 0.0, 0.0, 0.0]
 
 command_log_path: "./logs/command_log.csv"
 
