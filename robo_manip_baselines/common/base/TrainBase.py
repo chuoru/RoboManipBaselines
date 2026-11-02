@@ -19,7 +19,7 @@ import matplotlib.pylab as plt
 import numpy as np
 import psutil
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from ..data.CachedDataset import CachedDataset
@@ -220,6 +220,60 @@ class TrainBase(ABC):
             help="skip interval of data sequence (set 1 for no skip)",
         )
 
+        # Training on segment-runner rollouts with interventions (HG-DAgger,
+        # see common/utils/InterventionUtils.py). All off by default.
+        parser.add_argument(
+            "--rollout_data_filter",
+            type=str,
+            default="none",
+            choices=["none", "d8"],
+            help="d8: from episodes with intervention labels, train only on the "
+            "human corrections of successful attempts, weighted by "
+            "--intervention_weight (plain demos are used whole, weight 1)",
+        )
+        parser.add_argument(
+            "--pre_intervention_drop_sec",
+            type=float,
+            default=1.0,
+            help="d8: never use this long [s] before a take-over",
+        )
+        parser.add_argument(
+            "--boundary_drop_ticks",
+            type=int,
+            default=2,
+            help="d8: also drop this many steps at both ends of an intervention",
+        )
+        parser.add_argument(
+            "--intervention_weight",
+            type=float,
+            default=2.5,
+            help="d8: sampling weight of human-correction samples (demos: 1)",
+        )
+        parser.add_argument(
+            "--autonomous_weight",
+            type=float,
+            default=0.0,
+            help="d8: sampling weight of the policy's own steps in successful "
+            "attempts (0 = do not use them)",
+        )
+        parser.add_argument(
+            "--val_dataset_dir",
+            type=str,
+            nargs="+",
+            default=None,
+            help="fixed validation episodes (directories or .rmb paths), kept out "
+            "of training -- use the same set across training iterations so the "
+            "val loss stays comparable. Default: a random split of --dataset_dir.",
+        )
+        parser.add_argument(
+            "--reuse_stats_from",
+            type=str,
+            default=None,
+            help="model_meta_info.pkl whose state/action normalization to reuse "
+            "(warm-starting from that model's checkpoint keeps its input/output "
+            "scaling); warns where the new data leaves that range",
+        )
+
         parser.add_argument("--batch_size", type=int, help="batch size")
         parser.add_argument("--num_epochs", type=int, help="number of epochs")
         parser.add_argument("--lr", type=float, help="learning rate")
@@ -303,12 +357,29 @@ class TrainBase(ABC):
             )
         random.shuffle(self.all_filenames)
 
+        # Fixed validation set: out of the training files, but part of the
+        # normalization statistics like any other episode.
+        self.val_filenames = None
+        if self.args.val_dataset_dir is not None:
+            val_filenames = []
+            for val_dir in self.args.val_dataset_dir:
+                val_filenames += find_rmb_files(val_dir, dedupe=True)
+            val_keys = {os.path.normcase(os.path.abspath(f)) for f in val_filenames}
+            self.all_filenames = [
+                f
+                for f in self.all_filenames
+                if os.path.normcase(os.path.abspath(f)) not in val_keys
+            ]
+            self.val_filenames = sorted(set(val_filenames))
+
     def setup_model_meta_info(self):
         self.model_meta_info = {
             "data": {
                 "name": self.get_combined_dataset_name(),
                 "skip": self.args.skip,
                 "relative_eef_action": self.args.relative_eef_action,
+                # Read by the datasets (DpStyleDatasetMixin, ActDataset).
+                "rollout_data_filter": self.get_rollout_data_filter_config(),
             },
             "policy": {"name": self.policy_name},
             "train": {
@@ -333,6 +404,17 @@ class TrainBase(ABC):
             },
         }
 
+    def get_rollout_data_filter_config(self):
+        if self.args.rollout_data_filter == "none":
+            return None
+        return {
+            "type": self.args.rollout_data_filter,
+            "pre_intervention_drop_sec": self.args.pre_intervention_drop_sec,
+            "boundary_drop_ticks": self.args.boundary_drop_ticks,
+            "intervention_weight": self.args.intervention_weight,
+            "autonomous_weight": self.args.autonomous_weight,
+        }
+
     def setup_dataset(self):
         if self.args.enable_rmb_cache and self.args.use_cached_dataset:
             raise ValueError(
@@ -340,17 +422,29 @@ class TrainBase(ABC):
             )
 
         # Get file list
-        num_files = len(self.all_filenames)
-        train_num = max(int(np.clip(self.args.train_ratio, 0.0, 1.0) * num_files), 1)
-        if self.args.val_ratio is None:
-            val_num = max(num_files - train_num, 1)
+        if getattr(self, "val_filenames", None) is not None:
+            train_filenames = list(self.all_filenames)
+            val_filenames = list(self.val_filenames)
+            # Statistics over every episode, as without a fixed val set.
+            self.all_filenames = train_filenames + val_filenames
         else:
-            val_num = max(int(np.clip(self.args.val_ratio, 0.0, 1.0) * num_files), 1)
-        train_filenames = self.all_filenames[:train_num]
-        val_filenames = self.all_filenames[-1 * val_num :]
+            num_files = len(self.all_filenames)
+            train_num = max(
+                int(np.clip(self.args.train_ratio, 0.0, 1.0) * num_files), 1
+            )
+            if self.args.val_ratio is None:
+                val_num = max(num_files - train_num, 1)
+            else:
+                val_num = max(
+                    int(np.clip(self.args.val_ratio, 0.0, 1.0) * num_files), 1
+                )
+            train_filenames = self.all_filenames[:train_num]
+            val_filenames = self.all_filenames[-1 * val_num :]
 
         # Set data stats
         self.set_data_stats()
+        if self.args.reuse_stats_from is not None:
+            self.reuse_data_stats(self.args.reuse_stats_from)
 
         # Make dataloader
         self.train_dataloader = self.make_dataloader(train_filenames, shuffle=True)
@@ -378,10 +472,13 @@ class TrainBase(ABC):
         rgb_image_example = None
         depth_image_example = None
         episode_len_list = []
+        demo_episode_len_list = []
         for filename in self.all_filenames:
             with RmbData(filename) as rmb_data:
                 episode_len = rmb_data[DataKey.TIME][:: self.args.skip].shape[0]
                 episode_len_list.append(episode_len)
+                if DataKey.INTERVENTION not in rmb_data.keys():
+                    demo_episode_len_list.append(episode_len)
 
                 # Load state
                 if len(self.args.state_keys) == 0:
@@ -447,12 +544,56 @@ class TrainBase(ABC):
                 "depth_example": depth_image_example,
             }
         )
+        if (
+            self.args.rollout_data_filter != "none"
+            and 0 < len(demo_episode_len_list) < len(episode_len_list)
+        ):
+            # Rollout attempts start mid-task or are cut short; the rollout
+            # step limit must come from the full demonstrations (D10).
+            episode_len_list = demo_episode_len_list
         self.model_meta_info["data"].update(
             {
                 "mean_episode_len": np.mean(episode_len_list),
                 "min_episode_len": np.min(episode_len_list),
                 "max_episode_len": np.max(episode_len_list),
             }
+        )
+
+    # Keys of a state/action stats dict that define the normalization.
+    NORM_STATS_KEYS = ("norm_config", "min", "max", "range", "mean", "std")
+
+    def reuse_data_stats(self, model_meta_info_path):
+        """Replace the state/action normalization with that of an earlier
+        model (warm start), warning where the new data falls outside it."""
+        with open(model_meta_info_path, "rb") as f:
+            old_meta = pickle.load(f)
+        for group in ("state", "action"):
+            new_stats = self.model_meta_info[group]
+            old_stats = old_meta[group]
+            if len(old_stats["min"]) != len(new_stats["min"]):
+                raise ValueError(
+                    f"[{self.__class__.__name__}] --reuse_stats_from: {group} dim "
+                    f"{len(old_stats['min'])} != {len(new_stats['min'])}"
+                )
+            margin = 0.05 * np.asarray(old_stats["range"])
+            below = np.asarray(new_stats["min"]) < np.asarray(old_stats["min"]) - margin
+            above = np.asarray(new_stats["max"]) > np.asarray(old_stats["max"]) + margin
+            if np.any(below | above):
+                print(
+                    f"[{self.__class__.__name__}] WARNING: new {group} data leaves the "
+                    f"reused normalization range in dims {np.where(below | above)[0].tolist()} "
+                    f"(new min {np.round(new_stats['min'], 4).tolist()}, max "
+                    f"{np.round(new_stats['max'], 4).tolist()}; reused min "
+                    f"{np.round(old_stats['min'], 4).tolist()}, max "
+                    f"{np.round(old_stats['max'], 4).tolist()})"
+                )
+            for key in self.NORM_STATS_KEYS:
+                new_stats[key] = copy.deepcopy(old_stats[key])
+        self.model_meta_info["data"]["reused_stats_from"] = os.path.abspath(
+            model_meta_info_path
+        )
+        print(
+            f"[{self.__class__.__name__}] Reuse normalization stats from {model_meta_info_path}"
         )
 
     def get_relative_action_samples(self, rmb_data, episode_len):
@@ -545,6 +686,25 @@ class TrainBase(ABC):
         dataloader_kwargs = {}
         if self.args.num_workers > 0:
             dataloader_kwargs.update(persistent_workers=True, prefetch_factor=4)
+
+        # With --rollout_data_filter, datasets give each sample a weight
+        # (human corrections > demos). Sampling by weight replaces shuffling
+        # for training; validation stays an unweighted pass.
+        sample_weights = getattr(
+            getattr(dataset, "dataset", dataset), "sample_weights", None
+        )
+        if (
+            shuffle
+            and sample_weights is not None
+            and len(sample_weights) > 0
+            and np.ptp(sample_weights) > 0
+        ):
+            dataloader_kwargs["sampler"] = WeightedRandomSampler(
+                torch.as_tensor(sample_weights, dtype=torch.double),
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            shuffle = False
 
         dataloader = DataLoader(
             dataset,

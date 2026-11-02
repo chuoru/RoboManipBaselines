@@ -158,3 +158,25 @@ $ python ./bin/RolloutSegments.py RealFairino5Demo \
 - 記録: 学習区間の1回の試行ごとに `dataset/CupPickPlace_<区間>_rollout_iter001/` へ保存され、各ステップに `intervention`（人が操作中なら 1）と `intervention_input_active`（実際に SpaceMouse を動かしていれば 1）、属性に `num_interventions` / `intervention_time` / `intervention_methods` / `segment_result` などが入ります。
 - `--iteration N` は「このデータを使う学習の反復番号」です（iter000 の policy で集めたデータは `--iteration 1`）。
 - 展示モード（`--mode exhibit`）では介入できません。
+
+## 8. 介入データでの反復学習（iter001 以降）
+
+1. iter000 の policy で `--enable_intervention --save_rollout --iteration 1` を回し、介入（人の修正）が約5本たまったら1反復回します。
+2. 学習:
+   ```console
+   $ ./train_segment.sh CupPickPlace grasp 1
+   ```
+   - データ: 初期デモ `SM_iter000*` + 追加デモ `SM_iter001*`（あれば）+ `rollout_iter001`（いずれも 5 Hz に再サンプリング）
+   - `--rollout_data_filter d8`: 介入付きの試行からは、**最終的に成功した試行の、人が実際に操作していた区間だけ**を重み 2.5 で使います。介入直前 1 秒、介入直後の反応遅れ（SpaceMouse を触る前）、切り替え前後 2 ステップは捨てます。失敗した試行・policy だけで動いた区間は使いません。初期デモは全体を重み 1 で使います。
+   - 1サンプルは行動 16 ステップ（5 Hz で約 3 秒）がすべて使える区間に収まる必要があります。**介入は区間の最後まで続けるか、少なくとも 4 秒程度は操作してから戻す**と学習に使えるサンプルになります（短すぎる介入は使われません。学習ログの `Rollout data filter 'd8': ... samples` で数を確認）。
+   - 前の反復のチェックポイントから warm start し、前の反復の正規化統計を使います（範囲外のデータは警告）。エポック数は 50 + early stopping（`NUM_EPOCHS` / `PATIENCE` で変更）。
+   - 検証データは初期デモから固定（`dataset/resampled_5hz/CupPickPlace_grasp_val.txt`、初回に作成）。反復の間で val loss を比べられます。
+   - 暴走防止のステップ上限（`max_episode_len`）は初期デモだけから計算されます。
+3. 新しいチェックポイント `checkpoint/DiffusionPolicy/CupPickPlace_grasp_iter001/` を区間 YAML（または `--checkpoint grasp=...`）に設定し、`--iteration 2` でデータを集める……を繰り返します。
+4. 効果の確認:
+   ```console
+   $ python ./misc/SummarizeIterations.py --task CupPickPlace
+   ```
+   区間・反復ごとの成功率、介入回数 / 試行、平均介入時間、リトライ率、失敗理由と、失敗した試行の最初のカメラ画像の一覧（`logs/iteration_summary/`）が出ます。苦手な位置・向きが見えたら、そこのデモを `SM_iter00N` として追加するのも有効です（介入が間に合わない場合の代替）。
+
+M6 の完了条件: iter000 → iter001 で、同じ条件の試行における「介入回数 / 試行」が減る、または成功率が上がること。

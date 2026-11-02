@@ -62,6 +62,14 @@
 - [ ] 記録された試行の `intervention` / `intervention_input_active` が操作と合っている（`python ./misc/VisualizeData.py <rmb>` 等）
 - [ ] Esc / Ctrl+C の挙動が変わっていない
 
+## M6. 介入データでの反復学習
+
+- [ ] `./train_segment.sh CupPickPlace grasp 1` が完走する（warm start、統計の再利用、`Rollout data filter 'd8'` のサンプル数がログに出る）
+- [ ] 介入由来のサンプル数が十分か（少なければ介入を長めに / 回数を増やす）
+- [ ] 統計範囲外の警告が出ていない（出たら、その次元のデータを確認）
+- [ ] iter000 と iter001 を同じ配置条件で比べ、`misc/SummarizeIterations.py` の「介入回数 / 試行」が減る、または成功率が上がる（値を記録: ）
+- [ ] 失敗した試行の初期画像一覧（`logs/iteration_summary/failures_*.png`）で苦手な配置を確認し、必要ならその配置のデモを追加した
+
 ## M7. 展示モードでの連続稼働試験（最終確認）
 
 - [ ] 展示会と同じ設置（照明・背景・テーブル・カップ・印）にした

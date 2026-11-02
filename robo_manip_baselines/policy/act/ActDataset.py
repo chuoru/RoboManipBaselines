@@ -10,10 +10,49 @@ from robo_manip_baselines.common import (
     get_skipped_data_seq,
     get_skipped_single_data,
 )
+from robo_manip_baselines.common.utils.InterventionUtils import (
+    get_d8_masks,
+    get_window_weight,
+)
 
 
 class ActDataset(DatasetBase):
     """Dataset to train ACT policy."""
+
+    def setup_variables(self):
+        # With a rollout data filter (TrainBase --rollout_data_filter), only
+        # start steps whose whole action chunk is usable are drawn, episodes
+        # without any are left out, and each episode gets a sampling weight.
+        self.valid_start_idxes = None
+        self.sample_weights = None
+        filter_config = self.model_meta_info["data"].get("rollout_data_filter")
+        if filter_config is None:
+            return
+        skip = self.model_meta_info["data"]["skip"]
+        chunk_size = self.model_meta_info["data"]["chunk_size"]
+        filenames = []
+        self.valid_start_idxes = []
+        self.sample_weights = []
+        for filename in self.filenames:
+            with RmbData(filename) as rmb_data:
+                episode_len = rmb_data[DataKey.TIME][::skip].shape[0]
+                masks = get_d8_masks(rmb_data, filter_config, skip)
+            if masks is None:
+                starts, weights = np.arange(episode_len), [1.0]
+            else:
+                starts, weights = [], []
+                for start in range(episode_len):
+                    time_idxes = np.arange(start, min(start + chunk_size, episode_len))
+                    weight = get_window_weight(*masks, time_idxes)
+                    if weight > 0.0:
+                        starts.append(start)
+                        weights.append(weight)
+            if len(starts) == 0:
+                continue
+            filenames.append(filename)
+            self.valid_start_idxes.append(np.asarray(starts))
+            self.sample_weights.append(float(np.mean(weights)))
+        self.filenames = filenames
 
     def __len__(self):
         return len(self.filenames)
@@ -24,7 +63,10 @@ class ActDataset(DatasetBase):
 
         with RmbData(self.filenames[episode_idx], self.enable_rmb_cache) as rmb_data:
             episode_len = rmb_data[DataKey.TIME][::skip].shape[0]
-            start_time_idx = np.random.choice(episode_len)
+            if self.valid_start_idxes is None:
+                start_time_idx = np.random.choice(episode_len)
+            else:
+                start_time_idx = int(np.random.choice(self.valid_start_idxes[episode_idx]))
 
             # Load state
             if len(self.model_meta_info["state"]["keys"]) == 0:
